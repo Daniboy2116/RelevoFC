@@ -1,7 +1,7 @@
 // Injected into explorer.exe. Records what Explorer queues on IFileOperation and, at
 // PerformOperations, runs our engine instead of Windows' copy. Anything we don't fully
 // understand falls back to the original PerformOperations untouched.
-// Kill switch: create %TEMP%\fastcopy_off to make every operation native.
+// Kill switch: create %TEMP%\relevofc_off to make every operation native.
 #define _WIN32_WINNT 0x0A00
 #define CINTERFACE
 #define COBJMACROS
@@ -148,7 +148,7 @@ static BOOL Disabled(void)
 {
     WCHAR p[MAX_PATH];
     GetTempPathW(MAX_PATH, p);
-    wcscat_s(p, MAX_PATH, L"fastcopy_off");
+    wcscat_s(p, MAX_PATH, L"relevofc_off");
     return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
 }
 
@@ -287,7 +287,7 @@ static HRESULT STDMETHODCALLTYPE hkPerform(IFileOperation *op)
     static const PCWSTR names[] = { L"OK", L"FALLBACK", L"ERROR", L"CANCELLED" };
     ULONGLONG ms = GetTickCount64() - t0;
     LONG64 bytes = prog.bytesDone;
-    FcLog(L"op=%p FASTCOPY %s items=%d files=%ld/%ld bytes=%lld %llu ms (%.1f MB/s)", op, names[r], n,
+    FcLog(L"op=%p RELEVOFC %s items=%d files=%ld/%ld bytes=%lld %llu ms (%.1f MB/s)", op, names[r], n,
           prog.filesDone, prog.filesTotal, bytes, ms, ms ? bytes / 1048576.0 / (ms / 1000.0) : 0.0);
     if (r == FC_ERROR && prog.filesFailed) {
         FcLog(L"op=%p %ld file(s) failed:\n%s", op, prog.filesFailed, prog.failed);

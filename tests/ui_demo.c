@@ -1,6 +1,6 @@
 // Runs the real progress window outside Explorer, one copy per file, all at once, to try the UI
 // without restarting Explorer. Usage: ui_demo.exe <dst folder> <file> [<file> ...]
-// A number N in %TEMP%\fastcopy_slow throttles each file to N MB/s so the window stays up.
+// A number N in %TEMP%\relevofc_slow throttles each file to N MB/s so the window stays up.
 #include <windows.h>
 #include "../src/hook/ui.h"
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='amd64' publicKeyToken='6595b64144ccf1df' language='*'\"")  // comctl32 v6, as in Explorer

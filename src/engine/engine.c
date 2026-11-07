@@ -13,8 +13,8 @@
 #define MAX_WORKERS 16
 #define VERIFY_BLOCK (1024 * 1024)
 
-// User settings, read at the start of every operation from %APPDATA%\FastCopy\settings.ini
-// (FASTCOPY_INI overrides the path; the tests use it). Missing file or key: the defaults.
+// User settings, read at the start of every operation from %APPDATA%\RelevoFC\settings.ini
+// (RELEVOFC_INI overrides the path; the tests use it). Missing file or key: the defaults.
 //   [engine]  threads=8  big_file_mb=256  verify_copies=0
 static int gWorkers = 8;
 static ULONGLONG gBigFile = 256ull * 1024 * 1024;  // above this, copy without the system cache
@@ -23,10 +23,10 @@ static BOOL gVerifyCopies;                         // moves always verify; this 
 static void LoadSettings(void)
 {
     WCHAR ini[MAX_PATH];
-    if (!GetEnvironmentVariableW(L"FASTCOPY_INI", ini, MAX_PATH)) {
+    if (!GetEnvironmentVariableW(L"RELEVOFC_INI", ini, MAX_PATH)) {
         if (!GetEnvironmentVariableW(L"APPDATA", ini, MAX_PATH))
             ini[0] = 0;
-        wcscat_s(ini, MAX_PATH, L"\\FastCopy\\settings.ini");
+        wcscat_s(ini, MAX_PATH, L"\\RelevoFC\\settings.ini");
     }
     gWorkers = GetPrivateProfileIntW(L"engine", L"threads", 8, ini);
     if (gWorkers < 1 || gWorkers > MAX_WORKERS)
@@ -303,7 +303,7 @@ static void LoadSlow(void)
     DWORD got = 0;
     gSlowBps = 0;
     GetTempPathW(MAX_PATH, p);
-    wcscat_s(p, MAX_PATH, L"fastcopy_slow");
+    wcscat_s(p, MAX_PATH, L"relevofc_slow");
     HANDLE h = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE)
         return;

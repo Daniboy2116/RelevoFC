@@ -1,4 +1,4 @@
-// FastCopy agent: runs in the user's session (started at logon from HKCU\...\Run) and keeps
+// RelevoFC agent: runs in the user's session (started at logon from HKCU\...\Run) and keeps
 // fc_hook.dll (next to this exe) loaded in every explorer.exe of the session, including
 // Explorer restarts. Runs with the user's rights on purpose: no SYSTEM process loads our DLL.
 //   fc_agent.exe          watch and inject (single instance)
@@ -116,7 +116,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
         return 0;
     }
 
-    HANDLE mutex = CreateMutexW(NULL, TRUE, L"Local\\FastCopyAgent");
+    HANDLE mutex = CreateMutexW(NULL, TRUE, L"Local\\RelevoFCAgent");
     if (GetLastError() == ERROR_ALREADY_EXISTS)
         return 0;
     FcLog(L"agent: started, dll=%s", dll);

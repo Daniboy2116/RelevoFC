@@ -4,7 +4,7 @@
 // all window state lives on that thread. Windows 11 look (light/dark, accent, per-monitor DPI),
 // taskbar progress, per-operation Pause/Cancel icon buttons. "Más detalles" morphs each
 // progress bar into a live speed graph (the bar is the graph flattened) and reveals the
-// item/data/time/route breakdown; the choice is remembered in HKCU\Software\FastCopy.
+// item/data/time/route breakdown; the choice is remembered in HKCU\Software\RelevoFC.
 #define _WIN32_WINNT 0x0A00
 #define UNICODE
 #define CINTERFACE
@@ -49,7 +49,7 @@
 #define ICON_BTN 32
 #define GRAPH_POINTS 200  // speed samples across 0..100 % of the operation
 #define SS 3              // meter supersampling: GDI draws aliased, downscaling smooths the edges
-#define SETTINGS_KEY L"Software\\FastCopy"
+#define SETTINGS_KEY L"Software\\RelevoFC"
 
 typedef struct {
     FcProgress *prog;
@@ -1232,7 +1232,7 @@ static void WheelScroll(Dlg *d, int delta)
 // Opened from the "Elegir archivos…" button. A modeless window owned by the progress window, which is
 // disabled while it is open. Every conflicting file shows its two versions side by side with a checkbox
 // each, like Windows' own dialog: source only = replace, destination only = skip, both = keep both.
-static const WCHAR kPickClass[] = L"FastCopyPicker", kListClass[] = L"FastCopyPickList";
+static const WCHAR kPickClass[] = L"RelevoFCPicker", kListClass[] = L"RelevoFCPickList";
 
 static PCWSTR NoPrefix(PCWSTR p) { return !wcsncmp(p, L"\\\\?\\", 4) ? p + 4 : p; }
 
@@ -2040,7 +2040,7 @@ static BOOL CreateDlgWindow(Dlg *d)
     int w = wr.right - wr.left, x = (anchor.left + anchor.right - w) / 2;
     int y = (anchor.top + anchor.bottom) / 2 - S(d, 120);
 
-    d->hwnd = CreateWindowExW(WS_EX_CONTROLPARENT, L"FastCopyProgress", L"", kStyle, x, y, w, wr.bottom - wr.top,
+    d->hwnd = CreateWindowExW(WS_EX_CONTROLPARENT, L"RelevoFCProgress", L"", kStyle, x, y, w, wr.bottom - wr.top,
                               NULL, NULL, gInst, NULL);
     if (!d->hwnd)
         return FALSE;
@@ -2148,7 +2148,7 @@ static DWORD WINAPI UiThread(LPVOID ready)
     wc.lpfnWndProc = WndProc;
     wc.hInstance = gInst;
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-    wc.lpszClassName = L"FastCopyProgress";
+    wc.lpszClassName = L"RelevoFCProgress";
     WCHAR exe[MAX_PATH];
     GetModuleFileNameW(NULL, exe, MAX_PATH);  // reuse Explorer's own icon
     wc.hIcon = ExtractIconW(gInst, exe, 0);
@@ -2164,9 +2164,9 @@ static DWORD WINAPI UiThread(LPVOID ready)
     WNDCLASSEXW mc = { sizeof(mc) };
     mc.lpfnWndProc = MgrProc;
     mc.hInstance = gInst;
-    mc.lpszClassName = L"FastCopyUiManager";
+    mc.lpszClassName = L"RelevoFCUiManager";
     RegisterClassExW(&mc);
-    gMgr = CreateWindowExW(0, L"FastCopyUiManager", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, gInst, NULL);
+    gMgr = CreateWindowExW(0, L"RelevoFCUiManager", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, gInst, NULL);
     SetEvent(ready);
 
     MSG m;
@@ -2262,7 +2262,7 @@ static BOOL AskErrorDialog(int count, PCWSTR list)
     };
     TASKDIALOGCONFIG cfg = { sizeof(cfg) };
     cfg.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION;
-    cfg.pszWindowTitle = L"FastCopy";
+    cfg.pszWindowTitle = L"RelevoFC";
     cfg.pszMainIcon = TD_WARNING_ICON;
     cfg.pszMainInstruction = head;
     cfg.pszContent = list;

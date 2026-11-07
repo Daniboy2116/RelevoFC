@@ -281,17 +281,17 @@ static void ErrorSuite(PCWSTR root, PCWSTR otherRoot)
     }
     CloseHandle(h);
 
-    // verify_copies=1 (through FASTCOPY_INI) adds the verify pass to plain copies too
+    // verify_copies=1 (through RELEVOFC_INI) adds the verify pass to plain copies too
     Path(ini, root, L"test.ini");
     WritePrivateProfileStringW(L"engine", L"verify_copies", L"1", ini);
     WritePrivateProfileStringW(L"engine", L"threads", L"2", ini);
-    SetEnvironmentVariableW(L"FASTCOPY_INI", ini);
+    SetEnvironmentVariableW(L"RELEVOFC_INI", ini);
     Nuke(dst);
     CreateDirectoryW(dst, NULL);
     Path(p, root, L"src\\single.txt");
     FcItem one = { FALSE, p, dst, NULL };
     CHECK(FcRun(&one, 1, Reset(&pr)) == FC_OK && pr.bytesTotal == 2 * 6);  // "single" is 6 bytes
-    SetEnvironmentVariableW(L"FASTCOPY_INI", NULL);
+    SetEnvironmentVariableW(L"RELEVOFC_INI", NULL);
 }
 
 static void Nuke(PCWSTR dir)
