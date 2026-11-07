@@ -226,6 +226,18 @@ static void LongSuite(PCWSTR root)
     CHECK(Exists(q));
 }
 
+// Error callback: the first time, release the locked file and ask to retry it.
+static HANDLE gLock;
+static int gErrAsked;
+static BOOL AskErr(FcProgress *pr, int count, PCWSTR list)
+{
+    (void)pr;
+    gErrAsked++;
+    CHECK(count == 1 && wcsstr(list, L"f05.txt") && wcschr(wcsstr(list, L"f05.txt"), L'\n'));  // path, then a reason line
+    if (gLock) { CloseHandle(gLock); gLock = NULL; }
+    return TRUE;
+}
+
 // A locked source file must not stop the rest; a move keeps the sources of whatever failed.
 static void ErrorSuite(PCWSTR root, PCWSTR otherRoot)
 {
@@ -242,6 +254,19 @@ static void ErrorSuite(PCWSTR root, PCWSTR otherRoot)
     CHECK(pr.filesFailed == 1 && pr.filesDone == 51 && wcsstr(pr.failed, L"f05.txt"));
     Path(p, otherRoot, L"dst\\tree\\f06.txt");
     CHECK(Exists(p));
+
+    // Retry: the callback frees the file and asks again; only that file is copied the second time.
+    Nuke(dst);
+    CreateDirectoryW(dst, NULL);
+    Reset(&pr);
+    pr.onError = AskErr;
+    gLock = h;
+    gErrAsked = 0;
+    CHECK(FcRun(&copy, 1, &pr) == FC_OK && gErrAsked == 1 && pr.filesDone == 52 && pr.filesFailed == 0);
+    Path(p, otherRoot, L"dst\\tree\\f05.txt");
+    CHECK(Exists(p));
+    CHECK(pr.bytesDone == pr.bytesTotal);  // the failed attempt's share was taken back
+    h = CreateFileW(locked, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
 
     Nuke(dst);
     CreateDirectoryW(dst, NULL);

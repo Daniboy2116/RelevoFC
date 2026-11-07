@@ -294,10 +294,15 @@ static void Layout(Dlg *d)
         int by = top + S(d, 84);
         BOOL bvisible = ask && o->cf > 0.6 && by >= viewTop && by + bh <= panelBottom && by + bh <= footerTop;
         // One file has nothing to choose file by file: three buttons then, four otherwise.
-        int nb = o->prog->conflictCount > 1 ? CONFLICT_BTNS : CONFLICT_BTNS - 1, bw = (rc.right - 2 * m - (nb - 1) * gap) / nb;
-        for (int k = 0; k < CONFLICT_BTNS && dw; k++)
+        // An error question has two buttons (skip, retry): the skip and keep-both slots, in two columns.
+        BOOL err = o->prog->askError != 0;
+        int nb = err ? 2 : o->prog->conflictCount > 1 ? CONFLICT_BTNS : CONFLICT_BTNS - 1, bw = (rc.right - 2 * m - (nb - 1) * gap) / nb;
+        for (int k = 0; k < CONFLICT_BTNS && dw; k++) {
+            int slot = err ? k - 1 : k;
+            BOOL shown = err ? (k == 1 || k == 2) : k < nb;
             if (o->cbtn[k])
-                dw = DeferWindowPos(dw, o->cbtn[k], NULL, m + k * (bw + gap), by, bw, bh, keep | (bvisible && k < nb ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+                dw = DeferWindowPos(dw, o->cbtn[k], NULL, m + slot * (bw + gap), by, bw, bh, keep | (bvisible && shown ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+        }
     }
     if (dw)
         EndDeferWindowPos(dw);
@@ -662,6 +667,24 @@ static void DrawPieces(HDC dc, int x, int y, int right, int h, PCWSTR *text, con
     }
 }
 
+// First failed file of the open error question, as its name and the reason Windows gave
+// (`failed` holds "path", newline, indented reason, newline, per file).
+static void ErrorParts(FcProgress *pr, PWSTR name, PWSTR why)
+{
+    name[0] = why[0] = 0;
+    PCWSTR nl = wcschr(pr->failed, L'\n');
+    if (!nl)
+        return;
+    WCHAR path[MAX_PATH];
+    wcsncpy_s(path, MAX_PATH, pr->failed, nl - pr->failed);
+    wcscpy_s(name, MAX_PATH, PathFindFileNameW(path));
+    nl++;
+    while (*nl == L' ')
+        nl++;
+    PCWSTR end = wcschr(nl, L'\n');
+    wcsncpy_s(why, 256, nl, end ? (size_t)(end - nl) : _TRUNCATE);
+}
+
 static void PaintPanel(Dlg *d, Op *o, HDC dc, int top, int width)
 {
     const Palette *pal = Pal(d);
@@ -680,6 +703,31 @@ static void PaintPanel(Dlg *d, Op *o, HDC dc, int top, int width)
     SelectObject(dc, d->font);
     DrawPieces(dc, m, top, right, S(d, 20), pieces, colors, 4);
 
+    if (pr->conflictPending && pr->askError) {
+        // Same panel for "some files failed": which one and why, then Skip / Retry below.
+        WCHAR name[MAX_PATH], why[256], ask[MAX_PATH + 64];
+        ErrorParts(pr, name, why);
+        LONG count = pr->conflictCount;
+        if (count == 1)
+            swprintf_s(ask, _countof(ask), L"No se pudo %s «%s»", o->move ? L"mover" : L"copiar", name);
+        else
+            swprintf_s(ask, _countof(ask), L"No se pudieron %s %ld archivos", o->move ? L"mover" : L"copiar", count);
+        RECT q = { m, top + S(d, 24), right - S(d, ICON_BTN) - S(d, 8), top + S(d, 52) };
+        SelectObject(dc, d->fontTitle);
+        SetTextColor(dc, pal->text);
+        DrawTextW(dc, ask, -1, &q, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        if (count > 1)
+            swprintf_s(ask, _countof(ask), L"Por ejemplo %s: %s", name, why);
+        else
+            wcscpy_s(ask, _countof(ask), why);
+        q.top = top + S(d, 54);
+        q.bottom = q.top + S(d, 22);
+        q.right = right;
+        SelectObject(dc, d->font);
+        SetTextColor(dc, pal->sub);
+        DrawTextW(dc, ask, -1, &q, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        return;
+    }
     if (pr->conflictPending) {
         // The question replaces the meter; its three buttons are child windows below this text.
         WCHAR ask[128];
@@ -929,7 +977,33 @@ static void DrawCheck(Dlg *d, HDC dc, RECT box, int state)  // state: 0 off, 1 m
     DeleteObject(pen);
 }
 
+static void DrawButtonNow(Dlg *d, const DRAWITEMSTRUCT *di);
+
+// Draws off-screen and copies the result in one go, so the background, the surface and the label
+// never reach the screen one after another (a hover change used to show a bare frame first).
 static void DrawButton(Dlg *d, const DRAWITEMSTRUCT *di)
+{
+    int w = di->rcItem.right - di->rcItem.left, h = di->rcItem.bottom - di->rcItem.top;
+    HDC mem = CreateCompatibleDC(di->hDC);
+    HBITMAP bmp = mem ? CreateCompatibleBitmap(di->hDC, w, h) : NULL;
+    if (!bmp) {  // out of GDI resources: draw straight to the screen as before
+        if (mem)
+            DeleteDC(mem);
+        DrawButtonNow(d, di);
+        return;
+    }
+    HGDIOBJ old = SelectObject(mem, bmp);
+    DRAWITEMSTRUCT off = *di;
+    off.hDC = mem;
+    SetRect(&off.rcItem, 0, 0, w, h);
+    DrawButtonNow(d, &off);
+    BitBlt(di->hDC, di->rcItem.left, di->rcItem.top, w, h, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+}
+
+static void DrawButtonNow(Dlg *d, const DRAWITEMSTRUCT *di)
 {
     const Palette *pal = Pal(d);
     HDC dc = di->hDC;
@@ -1029,6 +1103,10 @@ static LRESULT CALLBACK ButtonProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UI
     }
     if (msg == WM_MOUSEWHEEL || msg == WM_POINTERWHEEL)  // scroll the list even when the pointer is over an icon button
         return SendMessageW(GetParent(hwnd), msg, wp, lp);
+    // An owner-drawn BUTTON erases itself with the WM_CTLCOLORBTN brush (system white/grey) before
+    // WM_DRAWITEM paints it: that was the white flash on show and on hover. DrawButton fills every pixel.
+    if (msg == WM_ERASEBKGND)
+        return 1;
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
@@ -1087,6 +1165,13 @@ static void Tick(Dlg *d)
                                              (HMENU)(UINT_PTR)(ID_CONFLICT + k), gInst, NULL);
                 SetWindowSubclass(o->cbtn[k], ButtonProc, 1, (DWORD_PTR)d);
             }
+        }
+        if (asking) {  // the third button is "keep both" for a conflict and "retry" for an error
+            PCWSTR want = pr->askError ? L"Reintentar" : L"Conservar ambos";
+            WCHAR cur[32];
+            GetWindowTextW(o->cbtn[2], cur, 32);
+            if (wcscmp(cur, want))
+                SetWindowTextW(o->cbtn[2], want);
         }
         if (asking && !o->cseen) {  // bring the question into view; scrolling away is the user's call afterwards
             o->cseen = TRUE;
@@ -2163,6 +2248,50 @@ static FcConflictChoice AskConflictDialog(int count, PCWSTR example)
     return id == 100 ? FC_CONFLICT_REPLACE : id == 101 ? FC_CONFLICT_SKIP : id == 102 ? FC_CONFLICT_BOTH : FC_CONFLICT_CANCEL;
 }
 
+// Some files failed: say which and why, and offer to try just those again. Runs on the engine's thread.
+static BOOL AskErrorDialog(int count, PCWSTR list)
+{
+    WCHAR head[128];
+    if (count == 1)
+        wcscpy_s(head, 128, L"No se pudo copiar 1 archivo");
+    else
+        swprintf_s(head, 128, L"No se pudieron copiar %d archivos", count);
+    static const TASKDIALOG_BUTTON links[] = {
+        { 100, L"Reintentar\nVolver a copiar solo los archivos que fallaron." },
+        { 101, L"Omitir\nTerminar sin ellos; los originales no se tocan." },
+    };
+    TASKDIALOGCONFIG cfg = { sizeof(cfg) };
+    cfg.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION;
+    cfg.pszWindowTitle = L"FastCopy";
+    cfg.pszMainIcon = TD_WARNING_ICON;
+    cfg.pszMainInstruction = head;
+    cfg.pszContent = list;
+    cfg.pButtons = links;
+    cfg.cButtons = 2;
+    int id = 101;
+    return SUCCEEDED(TaskDialogIndirect(&cfg, &id, NULL, NULL)) && id == 100;
+}
+
+// Same hand-off as AskConflict: the question goes into the progress window's panel; if the window
+// is not there (or never appears), the caller shows AskErrorDialog instead. The engine already put
+// the text in prog->failed. Answer: 2 = retry, 1 = skip.
+static BOOL AskError(FcProgress *prog, int count, PCWSTR list)
+{
+    if (!prog->conflictEvent)
+        return AskErrorDialog(count, list);
+    prog->conflictCount = count;
+    prog->conflictChoice = -1;
+    prog->askError = 1;
+    prog->conflictPending = 1;
+    SetEvent(prog->conflictEvent);
+    while (prog->conflictChoice < 0 && !prog->cancel)
+        Sleep(30);
+    LONG c = prog->conflictChoice;
+    prog->conflictPending = 0;
+    prog->askError = 0;
+    return c == 2;
+}
+
 static DWORD WINAPI Worker(LPVOID arg)
 {
     Work *w = arg;
@@ -2174,6 +2303,7 @@ FcResult RunWithProgress(const FcItem *items, int n, FcProgress *prog)
 {
     Work work = { items, n, prog, FC_ERROR };
     prog->onConflict = AskConflict;
+    prog->onError = AskError;
     prog->conflictEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
     HANDLE th = CreateThread(NULL, 0, Worker, &work, 0, NULL);
     if (!th) {
@@ -2204,7 +2334,8 @@ FcResult RunWithProgress(const FcItem *items, int n, FcProgress *prog)
         BOOL ui = o && o->added;
         for (BOOL asked = r == WAIT_OBJECT_0 + 1;; asked = TRUE) {
             if (asked && !ui && prog->conflictPending)  // no window to ask in: use a dialog
-                prog->conflictChoice = AskConflictDialog(prog->conflictCount, prog->conflictExample);
+                prog->conflictChoice = prog->askError ? (AskErrorDialog(prog->conflictCount, prog->failed) ? 2 : 1)
+                                                      : AskConflictDialog(prog->conflictCount, prog->conflictExample);
             if (WaitForMultipleObjects(prog->conflictEvent ? 2 : 1, wait, FALSE, INFINITE) == WAIT_OBJECT_0)
                 break;
         }

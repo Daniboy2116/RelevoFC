@@ -46,7 +46,11 @@ typedef struct {
     BOOL exists;             // J_MKDIR onto an existing folder (merge)
     PWSTR src, dst;
     ULONGLONG size;
+    HRESULT hr;       // nonzero: the last attempt failed (FC_E_VERIFY: the copy differs from the source)
+    LONG64 credited;  // bytes the failed attempt added to the progress, taken back on a retry
 } Job;
+
+#define FC_E_VERIFY ((HRESULT)0xE0000001)
 
 typedef struct {
     Job *v;
@@ -108,6 +112,8 @@ static BOOL Push(Plan *p, int kind, BOOL fromMove, PCWSTR src, PCWSTR dst, ULONG
     j->kind = kind;
     j->fromMove = fromMove;
     j->done = FALSE;
+    j->hr = 0;
+    j->credited = 0;
     j->conflict = j->replace = j->exists = FALSE;
     DWORD da = GetFileAttributesW(dst);
     if (da != INVALID_FILE_ATTRIBUTES) {
@@ -357,18 +363,6 @@ typedef struct {
     volatile LONG failed;
 } CopyCtx;
 
-// One file failed: count it, remember its path for the report, and let the others carry on.
-static void Fail(FcProgress *prog, PCWSTR path)
-{
-    InterlockedIncrement(&prog->filesFailed);
-    AcquireSRWLockExclusive(&prog->lock);
-    if (wcslen(prog->failed) + wcslen(Plain(path)) + 2 < _countof(prog->failed)) {
-        wcscat_s(prog->failed, _countof(prog->failed), Plain(path));
-        wcscat_s(prog->failed, _countof(prog->failed), L"\n");
-    }
-    ReleaseSRWLockExclusive(&prog->lock);
-}
-
 static DWORD WINAPI CopyWorker(LPVOID arg)
 {
     CopyCtx *c = arg;
@@ -391,11 +385,10 @@ static DWORD WINAPI CopyWorker(LPVOID arg)
             if (!c->prog->cancel) {
                 FcLog(L"copy failed hr=0x%08lX %s", hr, j->src);
                 InterlockedIncrement(&c->failed);
-                Fail(c->prog, j->src);
-                // the verify pass of this file will never run: don't leave its share of the total pending
-                if (j->fromMove || gVerifyCopies)
-                    InterlockedAdd64(&c->prog->bytesDone, (LONG64)j->size);
-                InterlockedAdd64(&c->prog->bytesDone, (LONG64)(j->size - cc.reported));
+                j->hr = hr;
+                // count the file as handled so the bar keeps moving; a retry takes this back
+                j->credited = (LONG64)(j->size - cc.reported) + (j->fromMove || gVerifyCopies ? (LONG64)j->size : 0);
+                InterlockedAdd64(&c->prog->bytesDone, j->credited);
             }
             continue;
         }
@@ -406,7 +399,8 @@ static DWORD WINAPI CopyWorker(LPVOID arg)
             if (!c->prog->cancel) {
                 FcLog(L"verify failed, keeping source %s", j->src);
                 InterlockedIncrement(&c->failed);
-                Fail(c->prog, j->src);
+                j->hr = FC_E_VERIFY;
+                j->credited = (LONG64)j->size;  // the verify pass was (about) fully counted
                 ForceDelete(j->dst, FALSE);  // a bad copy is worse than none
             }
             continue;
@@ -416,11 +410,15 @@ static DWORD WINAPI CopyWorker(LPVOID arg)
     }
 }
 
-static BOOL RunCopies(Plan *p, int ncopy, FcProgress *prog)
+// Copies every job that is not done yet (all of them the first time, only the failed ones on a retry).
+static BOOL RunCopies(Plan *p, FcProgress *prog)
 {
+    int ncopy = 0;
+    for (int i = 0; i < p->n; i++)
+        ncopy += p->v[i].kind == J_COPY && !p->v[i].done;
     CopyCtx c = { p->v, malloc(ncopy * sizeof(int)), ncopy, prog, 0, 0 };
     for (int i = 0, k = 0; i < p->n; i++)
-        if (p->v[i].kind == J_COPY)
+        if (p->v[i].kind == J_COPY && !p->v[i].done)
             c.idx[k++] = i;
 
     HANDLE th[MAX_WORKERS];
@@ -435,6 +433,55 @@ static BOOL RunCopies(Plan *p, int ncopy, FcProgress *prog)
         CloseHandle(th[t]);
     free(c.idx);
     return c.failed == 0;
+}
+
+// What Windows says about the error, in the user's language.
+static void Reason(HRESULT hr, PWSTR out, int cap)
+{
+    if (hr == FC_E_VERIFY) {
+        wcsncpy_s(out, cap, L"La copia no coincide con el original.", _TRUNCATE);
+        return;
+    }
+    DWORD code = HRESULT_FACILITY(hr) == FACILITY_WIN32 ? HRESULT_CODE(hr) : (DWORD)hr;
+    if (!FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, code, 0, out, cap, NULL))
+        swprintf_s(out, cap, L"Error 0x%08lX", (unsigned long)hr);
+    for (int n = (int)wcslen(out); n > 0 && wcschr(L"\r\n ", out[n - 1]); )
+        out[--n] = 0;
+}
+
+// "path", newline, indented reason, per failed file, as many as fit.
+static int FailedText(Plan *p, PWSTR out, int cap)
+{
+    int count = 0;
+    out[0] = 0;
+    for (int i = 0; i < p->n; i++) {
+        Job *j = &p->v[i];
+        if (j->kind != J_COPY || !j->hr)
+            continue;
+        count++;
+        WCHAR why[256];
+        Reason(j->hr, why, 256);
+        if (wcslen(out) + wcslen(Plain(j->src)) + wcslen(why) + 8 < (size_t)cap)
+            swprintf_s(out + wcslen(out), cap - wcslen(out), L"%s\n   %s\n", Plain(j->src), why);
+    }
+    return count;
+}
+
+// Asks whether to retry the failed files; on yes, takes back what they added to the progress.
+static BOOL AskRetry(Plan *p, FcProgress *prog)
+{
+    WCHAR text[2048];
+    int count = FailedText(p, text, _countof(text));
+    wcscpy_s(prog->failed, _countof(prog->failed), text);  // the window reads the question from here
+    if (!prog->onError || !prog->onError(prog, count, text))
+        return FALSE;
+    for (int i = 0; i < p->n; i++)
+        if (p->v[i].kind == J_COPY && p->v[i].hr) {
+            InterlockedAdd64(&prog->bytesDone, -p->v[i].credited);
+            p->v[i].hr = 0;
+            p->v[i].credited = 0;
+        }
+    return TRUE;
 }
 
 static BOOL ForceDelete(PCWSTR path, BOOL dir)
@@ -537,7 +584,9 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
             goto out;
         }
     }
-    BOOL copied = !ncopy || RunCopies(&p, ncopy, prog);
+    BOOL copied = TRUE;
+    while (ncopy && !(copied = RunCopies(&p, prog)) && !prog->cancel && AskRetry(&p, prog))
+        ;
     prog->phase = FC_PHASE_FINISH;
     if (prog->cancel) {
         // A move cancelled mid-verify leaves a full but unverified copy: drop it, the source is intact.
@@ -549,6 +598,7 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
         goto out;
     }
     if (!copied) {
+        prog->filesFailed = FailedText(&p, prog->failed, _countof(prog->failed));
         DeleteMovedSources(&p, TRUE);  // the files that did make it; the failed ones and their folders stay
         goto out;
     }
