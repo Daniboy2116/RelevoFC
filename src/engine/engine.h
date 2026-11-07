@@ -35,12 +35,16 @@ struct FcProgress {
     // where to write one FcConflictChoice per file. Owned by the engine; valid until the answer is read.
     PCWSTR *conflictSrc, *conflictDst;
     volatile LONG *conflictPick;
+    // Files that failed (the rest of the operation carries on): count, and their paths one per line
+    // (truncated to fit); guarded by `lock`.
+    volatile LONG filesFailed;
+    WCHAR failed[1024];
 };
 
 typedef enum {
     FC_OK,         // everything copied/moved
     FC_FALLBACK,   // nothing was written; let Windows do it (conflicts, virtual paths, reparse points...)
-    FC_ERROR,      // failed after writing; sources of moves are never deleted in that case
+    FC_ERROR,      // some files failed (see prog->filesFailed); the others were done, and a move only deletes the sources it verified
     FC_CANCELLED   // user cancelled: finished files stay, moved files are only removed from the source once verified
 } FcResult;
 

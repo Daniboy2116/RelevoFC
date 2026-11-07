@@ -6,6 +6,7 @@
 #define CINTERFACE
 #define COBJMACROS
 #include <windows.h>
+#include <stdio.h>
 #include <shobjidl.h>
 #include <shlobj.h>
 #include "MinHook.h"
@@ -288,6 +289,13 @@ static HRESULT STDMETHODCALLTYPE hkPerform(IFileOperation *op)
     LONG64 bytes = prog.bytesDone;
     FcLog(L"op=%p FASTCOPY %s items=%d files=%ld/%ld bytes=%lld %llu ms (%.1f MB/s)", op, names[r], n,
           prog.filesDone, prog.filesTotal, bytes, ms, ms ? bytes / 1048576.0 / (ms / 1000.0) : 0.0);
+    if (r == FC_ERROR && prog.filesFailed) {
+        WCHAR msg[1300];
+        swprintf_s(msg, _countof(msg), L"%ld archivo(s) no se pudieron copiar o mover; el resto sí.\n"
+                   L"Los originales de lo que falló siguen en su sitio.\n\n%s", prog.filesFailed, prog.failed);
+        MessageBoxW(NULL, msg, L"FastCopy", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+        return HRESULT_FROM_WIN32(ERROR_CANCELLED);  // already reported: keeps Explorer from adding its own error
+    }
     return r == FC_OK ? S_OK : r == FC_CANCELLED ? HRESULT_FROM_WIN32(ERROR_CANCELLED) : E_FAIL;
 }
 

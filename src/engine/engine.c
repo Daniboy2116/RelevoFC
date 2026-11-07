@@ -10,9 +10,31 @@
 #include <stdlib.h>
 #include "engine.h"
 
-#define BIG_FILE (256ull * 1024 * 1024)  // above this, copy without the system cache
-#define MAX_WORKERS 8
+#define MAX_WORKERS 16
 #define VERIFY_BLOCK (1024 * 1024)
+
+// User settings, read at the start of every operation from %APPDATA%\FastCopy\settings.ini
+// (FASTCOPY_INI overrides the path; the tests use it). Missing file or key: the defaults.
+//   [engine]  threads=8  big_file_mb=256  verify_copies=0
+static int gWorkers = 8;
+static ULONGLONG gBigFile = 256ull * 1024 * 1024;  // above this, copy without the system cache
+static BOOL gVerifyCopies;                         // moves always verify; this adds copies
+
+static void LoadSettings(void)
+{
+    WCHAR ini[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"FASTCOPY_INI", ini, MAX_PATH)) {
+        if (!GetEnvironmentVariableW(L"APPDATA", ini, MAX_PATH))
+            ini[0] = 0;
+        wcscat_s(ini, MAX_PATH, L"\\FastCopy\\settings.ini");
+    }
+    gWorkers = GetPrivateProfileIntW(L"engine", L"threads", 8, ini);
+    if (gWorkers < 1 || gWorkers > MAX_WORKERS)
+        gWorkers = 8;
+    int mb = GetPrivateProfileIntW(L"engine", L"big_file_mb", 256, ini);
+    gBigFile = (ULONGLONG)(mb < 1 ? 256 : mb) * 1024 * 1024;
+    gVerifyCopies = GetPrivateProfileIntW(L"engine", L"verify_copies", 0, ini) != 0;
+}
 
 enum { J_RENAME, J_MKDIR, J_COPY, J_SKIP };
 
@@ -324,21 +346,35 @@ static BOOL SameContent(PCWSTR a, PCWSTR b, FcProgress *prog)
     return same;
 }
 
+static BOOL ForceDelete(PCWSTR path, BOOL dir);
+
 typedef struct {
     Job *v;
     int *idx;
     LONG n;
     FcProgress *prog;
     volatile LONG next;
-    volatile LONG err;
+    volatile LONG failed;
 } CopyCtx;
+
+// One file failed: count it, remember its path for the report, and let the others carry on.
+static void Fail(FcProgress *prog, PCWSTR path)
+{
+    InterlockedIncrement(&prog->filesFailed);
+    AcquireSRWLockExclusive(&prog->lock);
+    if (wcslen(prog->failed) + wcslen(Plain(path)) + 2 < _countof(prog->failed)) {
+        wcscat_s(prog->failed, _countof(prog->failed), Plain(path));
+        wcscat_s(prog->failed, _countof(prog->failed), L"\n");
+    }
+    ReleaseSRWLockExclusive(&prog->lock);
+}
 
 static DWORD WINAPI CopyWorker(LPVOID arg)
 {
     CopyCtx *c = arg;
     for (;;) {
         LONG i = InterlockedIncrement(&c->next) - 1;
-        if (i >= c->n || c->err || c->prog->cancel)
+        if (i >= c->n || c->prog->cancel)
             return 0;
         Job *j = &c->v[c->idx[i]];
         SetCurrent(c->prog, j->src);
@@ -347,24 +383,31 @@ static DWORD WINAPI CopyWorker(LPVOID arg)
         COPYFILE2_EXTENDED_PARAMETERS ep = { sizeof(ep) };
         if (j->replace)
             SetFileAttributesW(j->dst, FILE_ATTRIBUTE_NORMAL);  // a read-only target would refuse the overwrite
-        ep.dwCopyFlags = (j->replace ? 0 : COPY_FILE_FAIL_IF_EXISTS) | (j->size >= BIG_FILE ? COPY_FILE_NO_BUFFERING : 0);
+        ep.dwCopyFlags = (j->replace ? 0 : COPY_FILE_FAIL_IF_EXISTS) | (j->size >= gBigFile ? COPY_FILE_NO_BUFFERING : 0);
         ep.pProgressRoutine = OnChunk;
         ep.pvCallbackContext = &cc;
         HRESULT hr = CopyFile2(j->src, j->dst, &ep);
         if (FAILED(hr)) {
             if (!c->prog->cancel) {
                 FcLog(L"copy failed hr=0x%08lX %s", hr, j->src);
-                InterlockedCompareExchange(&c->err, hr, 0);
+                InterlockedIncrement(&c->failed);
+                Fail(c->prog, j->src);
+                // the verify pass of this file will never run: don't leave its share of the total pending
+                if (j->fromMove || gVerifyCopies)
+                    InterlockedAdd64(&c->prog->bytesDone, (LONG64)j->size);
+                InterlockedAdd64(&c->prog->bytesDone, (LONG64)(j->size - cc.reported));
             }
             continue;
         }
         if (cc.reported < j->size)  // small files may finish without a chunk callback
             InterlockedAdd64(&c->prog->bytesDone, (LONG64)(j->size - cc.reported));
 
-        if (j->fromMove && !SameContent(j->src, j->dst, c->prog)) {
+        if ((j->fromMove || gVerifyCopies) && !SameContent(j->src, j->dst, c->prog)) {
             if (!c->prog->cancel) {
                 FcLog(L"verify failed, keeping source %s", j->src);
-                InterlockedCompareExchange(&c->err, E_FAIL, 0);
+                InterlockedIncrement(&c->failed);
+                Fail(c->prog, j->src);
+                ForceDelete(j->dst, FALSE);  // a bad copy is worse than none
             }
             continue;
         }
@@ -382,7 +425,7 @@ static BOOL RunCopies(Plan *p, int ncopy, FcProgress *prog)
 
     HANDLE th[MAX_WORKERS];
     int nt = 0;
-    while (nt < MAX_WORKERS && nt < ncopy && (th[nt] = CreateThread(NULL, 0, CopyWorker, &c, 0, NULL)))
+    while (nt < gWorkers && nt < ncopy && (th[nt] = CreateThread(NULL, 0, CopyWorker, &c, 0, NULL)))
         nt++;
     if (nt)
         WaitForMultipleObjects(nt, th, TRUE, INFINITE);
@@ -391,7 +434,7 @@ static BOOL RunCopies(Plan *p, int ncopy, FcProgress *prog)
     for (int t = 0; t < nt; t++)
         CloseHandle(th[t]);
     free(c.idx);
-    return c.err == 0;
+    return c.failed == 0;
 }
 
 static BOOL ForceDelete(PCWSTR path, BOOL dir)
@@ -439,6 +482,7 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
     int i, ncopy = 0;
 
     LoadSlow();
+    LoadSettings();
     p.allow = prog->onConflict != NULL;
     prog->phase = FC_PHASE_PLAN;
     for (i = 0; i < n; i++) {
@@ -471,7 +515,7 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
     LONG64 total = 0;
     for (i = 0; i < p.n; i++)
         if (p.v[i].kind == J_COPY)
-            total += p.v[i].fromMove ? 2 * p.v[i].size : p.v[i].size;
+            total += p.v[i].fromMove || gVerifyCopies ? 2 * p.v[i].size : p.v[i].size;
     prog->bytesTotal = total;
     prog->filesTotal = ncopy;
     prog->phase = FC_PHASE_COPY;
@@ -504,8 +548,10 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
         res = FC_CANCELLED;
         goto out;
     }
-    if (!copied)
+    if (!copied) {
+        DeleteMovedSources(&p, TRUE);  // the files that did make it; the failed ones and their folders stay
         goto out;
+    }
     res = DeleteMovedSources(&p, FALSE) ? FC_OK : FC_ERROR;
 
 out:

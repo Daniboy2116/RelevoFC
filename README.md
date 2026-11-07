@@ -36,6 +36,15 @@ Ambas copias con el origen en caché y verificadas: mismos archivos y mismos byt
 - **Ventana de progreso** estilo Windows 11 (tema claro/oscuro, color de acento) con velocidad, tiempo restante, botones de icono para **pausar/reanudar** y **cancelar** cada operación, y progreso en el icono de la barra de tareas. Solo aparece si la operación dura más de medio segundo.
 - **Varias operaciones en una sola ventana**, como en Windows: un panel por copia o movimiento, cada uno con su propia gráfica, que entra y sale con animación. Si no caben, la lista se desplaza con la rueda, el touchpad (con DirectManipulation, como las vistas del Explorador) o arrastrando la barra.
 - **Archivos que ya existen en el destino:** el panel de la operación pregunta una vez qué hacer con todos: **Reemplazar**, **Omitir** o **Conservar ambos** (añade " (2)" al nombre). Con **Elegir archivos…** se decide archivo por archivo: cada uno muestra las dos versiones (tamaño, fecha y cuál es más reciente) con una casilla cada una; si marcas solo la del origen se reemplaza, solo la del destino se omite, y las dos se conservan ambas. Las carpetas con el mismo nombre se combinan.
+- **Un error no para todo:** si un archivo falla (bloqueado, sin permiso…), el resto se copia igual y al final aparece un informe con los que fallaron. Al mover, solo se borran los originales ya verificados; los que fallaron se quedan donde estaban.
+- **Ajustes** en `%APPDATA%\FastCopy\settings.ini` (opcional, se lee en cada operación):
+
+  ```ini
+  [engine]
+  threads=8          ; archivos a la vez (1-16)
+  big_file_mb=256    ; por encima, copia sin caché
+  verify_copies=0    ; 1 = verificar también las copias (más lento, al mover siempre se verifica)
+  ```
 - **Rutas largas:** copia y mueve carpetas anidadas más allá de los 260 caracteres de Windows (hasta unos 32.000).
 - **Más detalles:** la barra de progreso se transforma en una gráfica de velocidad de toda la operación (con media y máxima), y aparecen elementos procesados y restantes, datos, tiempo transcurrido y restante, y la ruta. Recuerda si lo dejaste abierto. Las animaciones respetan la opción "Efectos de animación" de Windows.
 - **Si no lo tiene claro, se lo deja a Windows.** Antes de escribir nada, FastCopy planifica toda la operación. Si encuentra algo que no maneja, no toca nada y la copia la hace Windows como siempre:
@@ -191,7 +200,7 @@ uninstall.ps1      lo quita todo
 
 ## Pendiente
 
-- Verificación también en copias (ahora solo se verifica al mover).
+- Verificación de copias más rápida (hash mientras se copia); hoy `verify_copies=1` relee ambos archivos.
 - Probar en Windows 10 y en otras versiones de Windows 11 (ver [Compatibilidad](#compatibilidad)).
 - Soporte para ARM64 (cambiar MinHook por Detours).
 - Firmar los binarios, para que Smart App Control y los antivirus no los bloqueen.

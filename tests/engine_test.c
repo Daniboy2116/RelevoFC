@@ -226,6 +226,49 @@ static void LongSuite(PCWSTR root)
     CHECK(Exists(q));
 }
 
+// A locked source file must not stop the rest; a move keeps the sources of whatever failed.
+static void ErrorSuite(PCWSTR root, PCWSTR otherRoot)
+{
+    WCHAR tree[MAX_PATH], dst[MAX_PATH], locked[MAX_PATH], p[MAX_PATH], ini[MAX_PATH];
+    FcProgress pr;
+    Path(tree, root, L"src\\tree");
+    Path(dst, otherRoot, L"dst");
+    Path(locked, root, L"src\\tree\\f05.txt");
+    HANDLE h = CreateFileW(locked, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    CHECK(h != INVALID_HANDLE_VALUE);
+
+    FcItem copy = { FALSE, tree, dst, NULL };
+    CHECK(FcRun(&copy, 1, Reset(&pr)) == FC_ERROR);
+    CHECK(pr.filesFailed == 1 && pr.filesDone == 51 && wcsstr(pr.failed, L"f05.txt"));
+    Path(p, otherRoot, L"dst\\tree\\f06.txt");
+    CHECK(Exists(p));
+
+    Nuke(dst);
+    CreateDirectoryW(dst, NULL);
+    if (_wcsicmp(root, otherRoot)) {  // same-volume moves are plain renames: nothing to fail
+        FcItem move = { TRUE, tree, dst, NULL };
+        CHECK(FcRun(&move, 1, Reset(&pr)) == FC_ERROR && pr.filesFailed == 1);
+        CHECK(Exists(locked));  // not copied, so not deleted
+        Path(p, root, L"src\\tree\\f06.txt");
+        CHECK(!Exists(p));      // verified, so gone from the source
+        Path(p, otherRoot, L"dst\\tree\\f06.txt");
+        CHECK(Exists(p));
+    }
+    CloseHandle(h);
+
+    // verify_copies=1 (through FASTCOPY_INI) adds the verify pass to plain copies too
+    Path(ini, root, L"test.ini");
+    WritePrivateProfileStringW(L"engine", L"verify_copies", L"1", ini);
+    WritePrivateProfileStringW(L"engine", L"threads", L"2", ini);
+    SetEnvironmentVariableW(L"FASTCOPY_INI", ini);
+    Nuke(dst);
+    CreateDirectoryW(dst, NULL);
+    Path(p, root, L"src\\single.txt");
+    FcItem one = { FALSE, p, dst, NULL };
+    CHECK(FcRun(&one, 1, Reset(&pr)) == FC_OK && pr.bytesTotal == 2 * 6);  // "single" is 6 bytes
+    SetEnvironmentVariableW(L"FASTCOPY_INI", NULL);
+}
+
 static void Nuke(PCWSTR dir)
 {
     WCHAR cmd[MAX_PATH + 32];
@@ -255,6 +298,11 @@ int wmain(void)
     LongSuite(root);
     Nuke(root);
 
+    CreateDirectoryW(root, NULL);
+    BuildTree(root);
+    ErrorSuite(root, root);
+    Nuke(root);
+
     if (GetDriveTypeW(L"D:\\") == DRIVE_FIXED) {
         WCHAR other[MAX_PATH];
         swprintf_s(other, MAX_PATH, L"D:\\fc_test_%llu", GetTickCount64());
@@ -272,6 +320,14 @@ int wmain(void)
         BuildTree(root);
         Path(tmp, other, L"dst"); CreateDirectoryW(tmp, NULL);
         ConflictSuite(root, other);
+        Nuke(root);
+        Nuke(other);
+
+        CreateDirectoryW(root, NULL);
+        CreateDirectoryW(other, NULL);
+        BuildTree(root);
+        Path(tmp, other, L"dst"); CreateDirectoryW(tmp, NULL);
+        ErrorSuite(root, other);
         Nuke(root);
         Nuke(other);
     }
