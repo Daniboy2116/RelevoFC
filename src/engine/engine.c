@@ -19,6 +19,8 @@
 static int gWorkers = 8;
 static ULONGLONG gBigFile = 256ull * 1024 * 1024;  // above this, copy without the system cache
 static BOOL gVerifyCopies;                         // moves always verify; this adds copies
+// Test seam: RELEVOFC_TEST_FAIL=N makes the Nth file of an operation fail as if its disk was unplugged.
+static volatile LONG gTestFail;
 
 static void LoadSettings(void)
 {
@@ -34,6 +36,8 @@ static void LoadSettings(void)
     int mb = GetPrivateProfileIntW(L"engine", L"big_file_mb", 256, ini);
     gBigFile = (ULONGLONG)(mb < 1 ? 256 : mb) * 1024 * 1024;
     gVerifyCopies = GetPrivateProfileIntW(L"engine", L"verify_copies", 0, ini) != 0;
+    WCHAR fail[16];
+    gTestFail = GetEnvironmentVariableW(L"RELEVOFC_TEST_FAIL", fail, 16) ? _wtoi(fail) : 0;
 }
 
 enum { J_RENAME, J_MKDIR, J_COPY, J_SKIP };
@@ -361,14 +365,32 @@ typedef struct {
     FcProgress *prog;
     volatile LONG next;
     volatile LONG failed;
+    volatile LONG halt;  // a device-level error: start no more files, every one would fail the same way
 } CopyCtx;
+
+// Errors that are about the disk or connection rather than this one file (unplugged, asleep, full,
+// network gone): the rest would fail too, so the operation stops and waits for the user.
+static BOOL DeviceGone(HRESULT hr)
+{
+    if (HRESULT_FACILITY(hr) != FACILITY_WIN32)
+        return FALSE;
+    switch (HRESULT_CODE(hr)) {
+    case ERROR_DEVICE_NOT_CONNECTED: case ERROR_NOT_READY: case ERROR_NO_SUCH_DEVICE: case ERROR_DEV_NOT_EXIST:
+    case ERROR_DEVICE_REMOVED: case ERROR_INVALID_DRIVE: case ERROR_PATH_NOT_FOUND: case ERROR_IO_DEVICE:
+    case ERROR_DISK_FULL: case ERROR_HANDLE_DISK_FULL: case ERROR_OPERATION_ABORTED: case ERROR_SEM_TIMEOUT:
+    case ERROR_BAD_NETPATH: case ERROR_NETNAME_DELETED: case ERROR_UNEXP_NET_ERR: case ERROR_NETWORK_UNREACHABLE:
+    case ERROR_CRC: case ERROR_GEN_FAILURE:
+        return TRUE;
+    }
+    return FALSE;
+}
 
 static DWORD WINAPI CopyWorker(LPVOID arg)
 {
     CopyCtx *c = arg;
     for (;;) {
         LONG i = InterlockedIncrement(&c->next) - 1;
-        if (i >= c->n || c->prog->cancel)
+        if (i >= c->n || c->prog->cancel || c->halt)
             return 0;
         Job *j = &c->v[c->idx[i]];
         SetCurrent(c->prog, j->src);
@@ -380,11 +402,14 @@ static DWORD WINAPI CopyWorker(LPVOID arg)
         ep.dwCopyFlags = (j->replace ? 0 : COPY_FILE_FAIL_IF_EXISTS) | (j->size >= gBigFile ? COPY_FILE_NO_BUFFERING : 0);
         ep.pProgressRoutine = OnChunk;
         ep.pvCallbackContext = &cc;
-        HRESULT hr = CopyFile2(j->src, j->dst, &ep);
+        HRESULT hr = gTestFail > 0 && InterlockedDecrement(&gTestFail) == 0 ? HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED)
+                                                                              : CopyFile2(j->src, j->dst, &ep);
         if (FAILED(hr)) {
             if (!c->prog->cancel) {
                 FcLog(L"copy failed hr=0x%08lX %s", hr, j->src);
                 InterlockedIncrement(&c->failed);
+                if (DeviceGone(hr))
+                    c->halt = 1;
                 j->hr = hr;
                 // count the file as handled so the bar keeps moving; a retry takes this back
                 j->credited = (LONG64)(j->size - cc.reported) + (j->fromMove || gVerifyCopies ? (LONG64)j->size : 0);
@@ -432,6 +457,7 @@ static BOOL RunCopies(Plan *p, FcProgress *prog)
     for (int t = 0; t < nt; t++)
         CloseHandle(th[t]);
     free(c.idx);
+    prog->errorHalted = c.halt;
     return c.failed == 0;
 }
 
@@ -480,6 +506,9 @@ static BOOL AskRetry(Plan *p, FcProgress *prog)
             InterlockedAdd64(&prog->bytesDone, -p->v[i].credited);
             p->v[i].hr = 0;
             p->v[i].credited = 0;
+            // A copy cut off mid-file (disk unplugged) can leave a partial target behind: it is ours, overwrite it.
+            if (GetFileAttributesW(p->v[i].dst) != INVALID_FILE_ATTRIBUTES)
+                p->v[i].replace = TRUE;
         }
     return TRUE;
 }
@@ -598,6 +627,9 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
         goto out;
     }
     if (!copied) {
+        for (i = 0; i < p.n; i++)  // files a halt never got to are not done either: report them
+            if (p.v[i].kind == J_COPY && !p.v[i].done && !p.v[i].hr)
+                p.v[i].hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
         prog->filesFailed = FailedText(&p, prog->failed, _countof(prog->failed));
         DeleteMovedSources(&p, TRUE);  // the files that did make it; the failed ones and their folders stay
         goto out;

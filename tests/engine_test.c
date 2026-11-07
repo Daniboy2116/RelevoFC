@@ -238,6 +238,18 @@ static BOOL AskErr(FcProgress *pr, int count, PCWSTR list)
     return TRUE;
 }
 
+// Halt callback: records where the engine stopped and answers retry or give up.
+static int gHaltAsked, gHaltRetry;
+static LONG gHaltDone;
+static BOOL AskHalt(FcProgress *pr, int count, PCWSTR list)
+{
+    (void)list;
+    gHaltAsked++;
+    gHaltDone = pr->filesDone;
+    CHECK(pr->errorHalted && count == 1);
+    return gHaltRetry;
+}
+
 // A locked source file must not stop the rest; a move keeps the sources of whatever failed.
 static void ErrorSuite(PCWSTR root, PCWSTR otherRoot)
 {
@@ -266,6 +278,30 @@ static void ErrorSuite(PCWSTR root, PCWSTR otherRoot)
     Path(p, otherRoot, L"dst\\tree\\f05.txt");
     CHECK(Exists(p));
     CHECK(pr.bytesDone == pr.bytesTotal);  // the failed attempt's share was taken back
+
+    // Disk "unplugged" at the 3rd file (one worker, so the order is fixed): the engine stops there instead
+    // of failing the other 49, asks once, and a retry finishes everything.
+    Path(ini, root, L"halt.ini");
+    WritePrivateProfileStringW(L"engine", L"threads", L"1", ini);
+    SetEnvironmentVariableW(L"RELEVOFC_INI", ini);
+    for (int retry = 1; retry >= 0; retry--) {
+        Nuke(dst);
+        CreateDirectoryW(dst, NULL);
+        SetEnvironmentVariableW(L"RELEVOFC_TEST_FAIL", L"3");
+        Reset(&pr);
+        pr.onError = AskHalt;
+        gHaltRetry = retry;
+        gHaltAsked = 0;
+        FcResult r = FcRun(&copy, 1, &pr);
+        CHECK(gHaltAsked == 1 && gHaltDone == 2);
+        if (retry)
+            CHECK(r == FC_OK && pr.filesDone == 52 && pr.bytesDone == pr.bytesTotal);
+        else
+            CHECK(r == FC_ERROR && pr.filesDone == 2 && pr.filesFailed == 50);  // 1 failed + 49 never started
+    }
+    SetEnvironmentVariableW(L"RELEVOFC_TEST_FAIL", NULL);
+    SetEnvironmentVariableW(L"RELEVOFC_INI", NULL);
+
     h = CreateFileW(locked, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
 
     Nuke(dst);

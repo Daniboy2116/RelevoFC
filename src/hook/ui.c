@@ -708,7 +708,9 @@ static void PaintPanel(Dlg *d, Op *o, HDC dc, int top, int width)
         WCHAR name[MAX_PATH], why[256], ask[MAX_PATH + 64];
         ErrorParts(pr, name, why);
         LONG count = pr->conflictCount;
-        if (count == 1)
+        if (pr->errorHalted)  // the disk went away (or is full): say where it stopped, then which file and why
+            swprintf_s(ask, _countof(ask), L"Detenido al %d %%", (int)(RealFrac(o) * 100));
+        else if (count == 1)
             swprintf_s(ask, _countof(ask), L"No se pudo %s «%s»", o->move ? L"mover" : L"copiar", name);
         else
             swprintf_s(ask, _countof(ask), L"No se pudieron %s %ld archivos", o->move ? L"mover" : L"copiar", count);
@@ -716,7 +718,9 @@ static void PaintPanel(Dlg *d, Op *o, HDC dc, int top, int width)
         SelectObject(dc, d->fontTitle);
         SetTextColor(dc, pal->text);
         DrawTextW(dc, ask, -1, &q, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-        if (count > 1)
+        if (pr->errorHalted)
+            swprintf_s(ask, _countof(ask), L"%s: %s", name, why);
+        else if (count > 1)
             swprintf_s(ask, _countof(ask), L"Por ejemplo %s: %s", name, why);
         else
             wcscpy_s(ask, _countof(ask), why);
@@ -1166,12 +1170,15 @@ static void Tick(Dlg *d)
                 SetWindowSubclass(o->cbtn[k], ButtonProc, 1, (DWORD_PTR)d);
             }
         }
-        if (asking) {  // the third button is "keep both" for a conflict and "retry" for an error
-            PCWSTR want = pr->askError ? L"Reintentar" : L"Conservar ambos";
-            WCHAR cur[32];
-            GetWindowTextW(o->cbtn[2], cur, 32);
-            if (wcscmp(cur, want))
-                SetWindowTextW(o->cbtn[2], want);
+        if (asking) {  // conflict: Skip / Keep both; failed files: Skip / Retry; stopped: Cancel / Retry
+            PCWSTR want[2] = { pr->askError && pr->errorHalted ? L"Cancelar" : L"Omitir",
+                               pr->askError ? L"Reintentar" : L"Conservar ambos" };
+            for (int k = 0; k < 2; k++) {
+                WCHAR cur[32];
+                GetWindowTextW(o->cbtn[k + 1], cur, 32);
+                if (wcscmp(cur, want[k]))
+                    SetWindowTextW(o->cbtn[k + 1], want[k]);
+            }
         }
         if (asking && !o->cseen) {  // bring the question into view; scrolling away is the user's call afterwards
             o->cseen = TRUE;
@@ -1863,6 +1870,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     ask = d->ops[i];
         if (ask && LOWORD(wp) == ID_CONFLICT + 3) {
             OpenPick(d, ask);  // the question stays open until the list is answered
+        } else if (ask && ask->prog->askError && ask->prog->errorHalted && LOWORD(wp) == ID_CONFLICT + 1) {
+            CancelOp(ask);  // "Cancelar" on a stopped operation: same as the X, the engine cleans up as on any cancel
+            StartFrames(d);
         } else if (ask) {
             InterlockedExchange(&ask->prog->conflictChoice, LOWORD(wp) - ID_CONFLICT);
             ask->prog->conflictPending = 0;

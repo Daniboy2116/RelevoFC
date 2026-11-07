@@ -37,6 +37,9 @@ struct FcProgress {
     // The same hand-off also carries the "some files failed" question: askError is set while it is open and the
     // answer is 1 (skip) or 2 (retry); the text to show is in `failed`.
     volatile LONG askError;
+    // The last copy round stopped early on a device-level error (unplugged, asleep, disk full...): the
+    // question is then "stopped at N %: retry or cancel" instead of "these files failed: retry or skip".
+    volatile LONG errorHalted;
     WCHAR conflictExample[MAX_PATH];
     // While a question is open: the conflicting files (source, existing target) and, for an EACH answer,
     // where to write one FcConflictChoice per file. Owned by the engine; valid until the answer is read.
