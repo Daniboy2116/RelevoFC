@@ -241,12 +241,15 @@ static BOOL AskErr(FcProgress *pr, int count, PCWSTR list)
 // Halt callback: records where the engine stopped and answers retry or give up.
 static int gHaltAsked, gHaltRetry;
 static LONG gHaltDone;
+static WCHAR gHaltPartial[MAX_PATH];  // a target to leave half-written, as an unplugged disk would
 static BOOL AskHalt(FcProgress *pr, int count, PCWSTR list)
 {
     (void)list;
     gHaltAsked++;
     gHaltDone = pr->filesDone;
     CHECK(pr->errorHalted && count == 1);
+    if (gHaltRetry)
+        WriteFileText(gHaltPartial, "partial", 0);
     return gHaltRetry;
 }
 
@@ -284,6 +287,7 @@ static void ErrorSuite(PCWSTR root, PCWSTR otherRoot)
     Path(ini, root, L"halt.ini");
     WritePrivateProfileStringW(L"engine", L"threads", L"1", ini);
     SetEnvironmentVariableW(L"RELEVOFC_INI", ini);
+    Path(gHaltPartial, otherRoot, L"dst\\tree\\f02.txt");  // the 3rd file: the one that "fails"
     for (int retry = 1; retry >= 0; retry--) {
         Nuke(dst);
         CreateDirectoryW(dst, NULL);
@@ -294,8 +298,11 @@ static void ErrorSuite(PCWSTR root, PCWSTR otherRoot)
         gHaltAsked = 0;
         FcResult r = FcRun(&copy, 1, &pr);
         CHECK(gHaltAsked == 1 && gHaltDone == 2);
-        if (retry)
+        if (retry) {
             CHECK(r == FC_OK && pr.filesDone == 52 && pr.bytesDone == pr.bytesTotal);
+            Path(p, root, L"src\\tree\\f02.txt");
+            CHECK(SameContent(p, gHaltPartial));  // the half-written target was overwritten, not a FILE_EXISTS
+        }
         else
             CHECK(r == FC_ERROR && pr.filesDone == 2 && pr.filesFailed == 50);  // 1 failed + 49 never started
     }

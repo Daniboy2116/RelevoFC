@@ -331,8 +331,10 @@ static COPYFILE2_MESSAGE_ACTION CALLBACK OnChunk(const COPYFILE2_MESSAGE *m, PVO
 }
 
 // Byte-by-byte comparison, used before deleting the source of a move.
-static BOOL SameContent(PCWSTR a, PCWSTR b, FcProgress *prog)
+// `read` gets the bytes it added to the progress, so a failed verify can be accounted for exactly.
+static BOOL SameContent(PCWSTR a, PCWSTR b, FcProgress *prog, LONG64 *read)
 {
+    *read = 0;
     HANDLE ha = CreateFileW(a, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     HANDLE hb = CreateFileW(b, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     char *ba = malloc(VERIFY_BLOCK), *bb = malloc(VERIFY_BLOCK);
@@ -342,6 +344,7 @@ static BOOL SameContent(PCWSTR a, PCWSTR b, FcProgress *prog)
         same = ReadFile(ha, ba, VERIFY_BLOCK, &ra, NULL) && ReadFile(hb, bb, VERIFY_BLOCK, &rb, NULL) &&
                ra == rb && !memcmp(ba, bb, ra);
         InterlockedAdd64(&prog->bytesDone, ra);
+        *read += ra;
         if (!ra)
             break;
     }
@@ -379,7 +382,7 @@ static BOOL DeviceGone(HRESULT hr)
     case ERROR_DEVICE_REMOVED: case ERROR_INVALID_DRIVE: case ERROR_PATH_NOT_FOUND: case ERROR_IO_DEVICE:
     case ERROR_DISK_FULL: case ERROR_HANDLE_DISK_FULL: case ERROR_OPERATION_ABORTED: case ERROR_SEM_TIMEOUT:
     case ERROR_BAD_NETPATH: case ERROR_NETNAME_DELETED: case ERROR_UNEXP_NET_ERR: case ERROR_NETWORK_UNREACHABLE:
-    case ERROR_CRC: case ERROR_GEN_FAILURE:
+    case ERROR_CRC: case ERROR_GEN_FAILURE: case ERROR_WRONG_DISK:  // WRONG_DISK: seen on a real USB pulled mid-copy
         return TRUE;
     }
     return FALSE;
@@ -411,21 +414,27 @@ static DWORD WINAPI CopyWorker(LPVOID arg)
                 if (DeviceGone(hr))
                     c->halt = 1;
                 j->hr = hr;
-                // count the file as handled so the bar keeps moving; a retry takes this back
-                j->credited = (LONG64)(j->size - cc.reported) + (j->fromMove || gVerifyCopies ? (LONG64)j->size : 0);
-                InterlockedAdd64(&c->prog->bytesDone, j->credited);
+                // `credited` is everything this file has put into the progress, so a retry takes back exactly that.
+                // One bad file counts as handled so the bar still reaches the end; after a device error the
+                // operation stops, and the bar shows only finished files: steady however often it is retried
+                // and however many files were in flight when the disk went away.
+                LONG64 whole = (LONG64)j->size * (j->fromMove || gVerifyCopies ? 2 : 1);
+                j->credited = c->halt ? 0 : whole;
+                InterlockedAdd64(&c->prog->bytesDone, j->credited - (LONG64)cc.reported);
             }
             continue;
         }
         if (cc.reported < j->size)  // small files may finish without a chunk callback
             InterlockedAdd64(&c->prog->bytesDone, (LONG64)(j->size - cc.reported));
 
-        if ((j->fromMove || gVerifyCopies) && !SameContent(j->src, j->dst, c->prog)) {
+        LONG64 verified = 0;
+        if ((j->fromMove || gVerifyCopies) && !SameContent(j->src, j->dst, c->prog, &verified)) {
             if (!c->prog->cancel) {
                 FcLog(L"verify failed, keeping source %s", j->src);
                 InterlockedIncrement(&c->failed);
                 j->hr = FC_E_VERIFY;
-                j->credited = (LONG64)j->size;  // the verify pass was (about) fully counted
+                j->credited = 2 * (LONG64)j->size;  // copy + verify, counted whole like any failed file
+                InterlockedAdd64(&c->prog->bytesDone, (LONG64)j->size - verified);
                 ForceDelete(j->dst, FALSE);  // a bad copy is worse than none
             }
             continue;
@@ -436,11 +445,20 @@ static DWORD WINAPI CopyWorker(LPVOID arg)
 }
 
 // Copies every job that is not done yet (all of them the first time, only the failed ones on a retry).
-static BOOL RunCopies(Plan *p, FcProgress *prog)
+static BOOL RunCopies(Plan *p, FcProgress *prog, BOOL retry)
 {
     int ncopy = 0;
-    for (int i = 0; i < p->n; i++)
-        ncopy += p->v[i].kind == J_COPY && !p->v[i].done;
+    for (int i = 0; i < p->n; i++) {
+        Job *j = &p->v[i];
+        if (j->kind != J_COPY || j->done)
+            continue;
+        ncopy++;
+        // On a retry a pending target that exists now did not at planning time (that would have been a
+        // conflict): it is a partial copy of ours, cut off when the disk went away. Checked here, not when
+        // the user was asked, because the disk may only have come back in between.
+        if (retry && GetFileAttributesW(j->dst) != INVALID_FILE_ATTRIBUTES)
+            j->replace = TRUE;
+    }
     CopyCtx c = { p->v, malloc(ncopy * sizeof(int)), ncopy, prog, 0, 0 };
     for (int i = 0, k = 0; i < p->n; i++)
         if (p->v[i].kind == J_COPY && !p->v[i].done)
@@ -506,9 +524,6 @@ static BOOL AskRetry(Plan *p, FcProgress *prog)
             InterlockedAdd64(&prog->bytesDone, -p->v[i].credited);
             p->v[i].hr = 0;
             p->v[i].credited = 0;
-            // A copy cut off mid-file (disk unplugged) can leave a partial target behind: it is ours, overwrite it.
-            if (GetFileAttributesW(p->v[i].dst) != INVALID_FILE_ATTRIBUTES)
-                p->v[i].replace = TRUE;
         }
     return TRUE;
 }
@@ -614,7 +629,7 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
         }
     }
     BOOL copied = TRUE;
-    while (ncopy && !(copied = RunCopies(&p, prog)) && !prog->cancel && AskRetry(&p, prog))
+    for (int round = 0; ncopy && !(copied = RunCopies(&p, prog, round > 0)) && !prog->cancel && AskRetry(&p, prog); round++)
         ;
     prog->phase = FC_PHASE_FINISH;
     if (prog->cancel) {
