@@ -35,12 +35,15 @@ Ambas copias con el origen en caché y verificadas: mismos archivos y mismos byt
 
 - **Se siente nativo:** no hay que abrir ningún programa. Arrastrar (botón izquierdo o derecho), cortar, copiar y pegar en el Explorador pasan por RelevoFC.
 - **Copia en paralelo** (hasta 8 archivos a la vez) y **sin caché** para archivos de más de 256 MB.
+- **Se adapta al disco:** en pendrives, tarjetas SD y discos duros (internos o por USB), los archivos de 2 MB o más se copian de uno en uno y los pequeños siguen en paralelo; en SSD y NVMe, todo en paralelo. Medido copiando 20 archivos de 10 MB: un pendrive USB 3.0 pasó de 11 a 16 MB/s y un disco duro USB de 18 a 32 MB/s; un SSD por USB (que se detecta por su soporte de TRIM) sigue en paralelo, que es su caso más rápido.
+- **Clonado de bloques** en volúmenes ReFS y Dev Drive: copiar dentro del mismo volumen es instantáneo y no ocupa espacio (2 GB en 0,14 s), porque RelevoFC usa la misma función de copia que Windows.
 - **Mover seguro entre discos:** copia, **verifica byte a byte** y solo entonces borra el original. Si algo falla, el original se queda donde estaba.
 - **Mover dentro del mismo disco** es un renombrado instantáneo, como en Windows.
 - **Ventana de progreso** estilo Windows 11 (tema claro/oscuro, color de acento) con velocidad, tiempo restante, botones de icono para **pausar/reanudar** y **cancelar** cada operación, y progreso en el icono de la barra de tareas. Solo aparece si la operación dura más de medio segundo.
 - **Varias operaciones en una sola ventana**, como en Windows: un panel por copia o movimiento, cada uno con su propia gráfica, que entra y sale con animación. Si no caben, la lista se desplaza con la rueda, el touchpad (con DirectManipulation, como las vistas del Explorador) o arrastrando la barra.
 - **Archivos que ya existen en el destino:** el panel de la operación pregunta una vez qué hacer con todos: **Reemplazar**, **Omitir** o **Conservar ambos** (añade " (2)" al nombre). Con **Elegir archivos…** se decide archivo por archivo: cada uno muestra las dos versiones (tamaño, fecha y cuál es más reciente) con una casilla cada una; si marcas solo la del origen se reemplaza, solo la del destino se omite, y las dos se conservan ambas. Las carpetas con el mismo nombre se combinan.
-- **Un error no para todo:** si un archivo falla (bloqueado, sin permiso…), el resto se copia igual y al final aparece un informe con los que fallaron. Al mover, solo se borran los originales ya verificados; los que fallaron se quedan donde estaban.
+- **Un error no para todo:** si un archivo falla (abierto en otro programa, sin permiso…), el resto se copia igual y al final el panel de la operación dice cuál falló y por qué (con el mensaje de Windows), con **Omitir** o **Reintentar**; reintentar vuelve a copiar solo los que fallaron. Al mover, solo se borran los originales ya verificados; los que fallaron se quedan donde estaban.
+- **Si se va el disco, espera:** si falla el disco o la conexión a mitad de copia (disco externo desconectado, unidad no lista, disco lleno, red caída…), RelevoFC no sigue intentando todo lo que falta: se detiene y el panel se queda en **«Detenido al N %»**, con el archivo y el motivo, y **Cancelar** o **Reintentar**. Al reconectar y reintentar sigue desde ahí; el archivo que quedó a medias se vuelve a copiar entero. Probado desenchufando un USB a mitad de copia.
 - **Ajustes** en `%APPDATA%\RelevoFC\settings.ini` (opcional, se lee en cada operación):
 
   ```ini
@@ -48,6 +51,7 @@ Ambas copias con el origen en caché y verificadas: mismos archivos y mismos byt
   threads=8          ; archivos a la vez (1-16)
   big_file_mb=256    ; por encima, copia sin caché
   verify_copies=0    ; 1 = verificar también las copias (más lento, al mover siempre se verifica)
+  big_files_one_at_a_time=-1  ; -1 = según el disco (recomendado), 0 = nunca, 1 = siempre
   ```
 - **Rutas largas:** copia y mueve carpetas anidadas más allá de los 260 caracteres de Windows (hasta unos 32.000).
 - **Más detalles:** la barra de progreso se transforma en una gráfica de velocidad de toda la operación (con media y máxima), y aparecen elementos procesados y restantes, datos, tiempo transcurrido y restante, y la ruta. Recuerda si lo dejaste abierto. Las animaciones respetan la opción "Efectos de animación" de Windows.
@@ -126,11 +130,14 @@ git submodule update --init
 | `fc_hook.dll` | El hook, el motor y la ventana de progreso; se carga dentro del Explorador |
 | `fc_agent.exe` | El agente que carga la DLL en el Explorador |
 | `engine_test.exe` | Tests del motor (no toca el Explorador) |
+| `bench.exe` | Mide una copia con el motor real: `bench.exe <hilos> <origen> <carpeta destino> [verify] [lane=0\|1]` |
 | `ui_demo.exe` | Abre la ventana de progreso real fuera del Explorador: `ui_demo.exe <destino> <archivo> [<archivo>...]` |
 
 `package.bat` compila y deja en `dist\RelevoFC.zip` lo que necesita un usuario (es el archivo que se sube a Releases).
 
 Para probar la ventana con discos rápidos, escribe un número N en `%TEMP%\relevofc_slow` y cada archivo se copiará a N MB/s como mucho (también dentro del Explorador). Bórralo para volver a la velocidad normal.
+
+Para ver el panel de «Detenido» sin desenchufar nada, define la variable de entorno `RELEVOFC_TEST_FAIL=N` antes de lanzar `ui_demo.exe`: el archivo número N de la operación fallará una vez como si se hubiera desconectado el disco.
 
 Para pasar los tests:
 
@@ -204,7 +211,6 @@ uninstall.ps1      lo quita todo
 
 ## Pendiente
 
-- Verificación de copias más rápida (hash mientras se copia); hoy `verify_copies=1` relee ambos archivos.
 - Probar en Windows 10 y en otras versiones de Windows 11 (ver [Compatibilidad](#compatibilidad)).
 - Soporte para ARM64 (cambiar MinHook por Detours).
 - Firmar los binarios, para que Smart App Control y los antivirus no los bloqueen.

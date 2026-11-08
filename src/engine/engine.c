@@ -3,6 +3,7 @@
 // (moves verify each copy byte by byte), and only then deletes the sources of cross-volume moves.
 #define _WIN32_WINNT 0x0A00
 #include <windows.h>
+#include <winioctl.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <wctype.h>
@@ -19,6 +20,7 @@
 static int gWorkers = 8;
 static ULONGLONG gBigFile = 256ull * 1024 * 1024;  // above this, copy without the system cache
 static BOOL gVerifyCopies;                         // moves always verify; this adds copies
+static int gOneBig = -1;                           // big files one at a time: -1 auto (SerialDevice), 0 never, 1 always
 // Test seam: RELEVOFC_TEST_FAIL=N makes the Nth file of an operation fail as if its disk was unplugged.
 static volatile LONG gTestFail;
 
@@ -36,6 +38,7 @@ static void LoadSettings(void)
     int mb = GetPrivateProfileIntW(L"engine", L"big_file_mb", 256, ini);
     gBigFile = (ULONGLONG)(mb < 1 ? 256 : mb) * 1024 * 1024;
     gVerifyCopies = GetPrivateProfileIntW(L"engine", L"verify_copies", 0, ini) != 0;
+    gOneBig = GetPrivateProfileIntW(L"engine", L"big_files_one_at_a_time", -1, ini);
     WCHAR fail[16];
     gTestFail = GetEnvironmentVariableW(L"RELEVOFC_TEST_FAIL", fail, 16) ? _wtoi(fail) : 0;
 }
@@ -330,7 +333,12 @@ static COPYFILE2_MESSAGE_ACTION CALLBACK OnChunk(const COPYFILE2_MESSAGE *m, PVO
     return WaitIfPaused(cc->prog) ? COPYFILE2_PROGRESS_CONTINUE : COPYFILE2_PROGRESS_CANCEL;
 }
 
-// Byte-by-byte comparison, used before deleting the source of a move.
+// Byte-by-byte comparison, used before deleting the source of a move (and for verify_copies).
+// Measured ways to speed it up, none worth it: reading both files at once with overlapped I/O was
+// slower (2 GB: 2.45 s vs 1.86 s, it defeats Windows' read-ahead); buffers allocated once per worker
+// changed nothing (the per-file cost on small files is opening two more files, not memory); hashing
+// while copying would mean replacing CopyFile2 (attributes, streams, ReFS block cloning) to save
+// only the source re-read, which is usually still cached.
 // `read` gets the bytes it added to the progress, so a failed verify can be accounted for exactly.
 static BOOL SameContent(PCWSTR a, PCWSTR b, FcProgress *prog, LONG64 *read)
 {
@@ -369,7 +377,47 @@ typedef struct {
     volatile LONG next;
     volatile LONG failed;
     volatile LONG halt;  // a device-level error: start no more files, every one would fail the same way
+    HANDLE bigLane;      // semaphore of 1 on a sequential device (see SerialDevice); NULL otherwise
 } CopyCtx;
+
+// Files this big go one at a time on a sequential device. Measured on a USB 3.0 stick: 10 MB files ran
+// 35-45 % faster one at a time than 8 at once, 4 MB files ~25 % faster; 1 MB and 64 KB files ran
+// 25 % to 2.5x faster with 8 at once. NVMe to NVMe, and a SATA SSD over USB, gain from parallelism
+// at every size (the USB SSD ran 10 MB files ~20 % slower one at a time).
+#define SERIAL_BIG (2ull * 1024 * 1024)
+
+// Spinning disks (seek penalty), and USB / SD / FireWire storage without TRIM: flash sticks, memory
+// cards and external hard disks. An SSD in a USB enclosure reports TRIM and stays parallel.
+static BOOL SerialDevice(PCWSTR path)
+{
+    WCHAR vol[MAX_PATH], dev[16];
+    if (!GetVolumePathNameW(path, vol, MAX_PATH))
+        return FALSE;
+    PCWSTR v = Plain(vol);
+    if (!iswalpha(v[0]) || v[1] != L':')
+        return FALSE;
+    swprintf_s(dev, 16, L"\\\\.\\%c:", v[0]);
+    HANDLE h = CreateFileW(dev, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);  // no access: query only
+    if (h == INVALID_HANDLE_VALUE)
+        return FALSE;
+    STORAGE_PROPERTY_QUERY q = { StorageDeviceSeekPenaltyProperty, PropertyStandardQuery };
+    DEVICE_SEEK_PENALTY_DESCRIPTOR sp = { 0 };
+    DWORD got;
+    BOOL serial = DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof(q), &sp, sizeof(sp), &got, NULL) && sp.IncursSeekPenalty;
+    BYTE buf[512];
+    q.PropertyId = StorageDeviceProperty;
+    if (!serial && DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof(q), buf, sizeof(buf), &got, NULL) &&
+        got >= sizeof(STORAGE_DEVICE_DESCRIPTOR)) {
+        STORAGE_BUS_TYPE bus = ((STORAGE_DEVICE_DESCRIPTOR *)buf)->BusType;
+        if (bus == BusTypeUsb || bus == BusTypeSd || bus == BusTypeMmc || bus == BusType1394) {
+            DEVICE_TRIM_DESCRIPTOR trim = { 0 };
+            q.PropertyId = StorageDeviceTrimProperty;
+            serial = !(DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof(q), &trim, sizeof(trim), &got, NULL) && trim.TrimEnabled);
+        }
+    }
+    CloseHandle(h);
+    return serial;
+}
 
 // Errors that are about the disk or connection rather than this one file (unplugged, asleep, full,
 // network gone): the rest would fail too, so the operation stops and waits for the user.
@@ -405,8 +453,13 @@ static DWORD WINAPI CopyWorker(LPVOID arg)
         ep.dwCopyFlags = (j->replace ? 0 : COPY_FILE_FAIL_IF_EXISTS) | (j->size >= gBigFile ? COPY_FILE_NO_BUFFERING : 0);
         ep.pProgressRoutine = OnChunk;
         ep.pvCallbackContext = &cc;
+        BOOL lane = c->bigLane && j->size >= SERIAL_BIG;
+        if (lane)
+            WaitForSingleObject(c->bigLane, INFINITE);
         HRESULT hr = gTestFail > 0 && InterlockedDecrement(&gTestFail) == 0 ? HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED)
                                                                               : CopyFile2(j->src, j->dst, &ep);
+        if (lane)
+            ReleaseSemaphore(c->bigLane, 1, NULL);
         if (FAILED(hr)) {
             if (!c->prog->cancel) {
                 FcLog(L"copy failed hr=0x%08lX %s", hr, j->src);
@@ -445,7 +498,7 @@ static DWORD WINAPI CopyWorker(LPVOID arg)
 }
 
 // Copies every job that is not done yet (all of them the first time, only the failed ones on a retry).
-static BOOL RunCopies(Plan *p, FcProgress *prog, BOOL retry)
+static BOOL RunCopies(Plan *p, FcProgress *prog, BOOL retry, BOOL serial)
 {
     int ncopy = 0;
     for (int i = 0; i < p->n; i++) {
@@ -459,7 +512,7 @@ static BOOL RunCopies(Plan *p, FcProgress *prog, BOOL retry)
         if (retry && GetFileAttributesW(j->dst) != INVALID_FILE_ATTRIBUTES)
             j->replace = TRUE;
     }
-    CopyCtx c = { p->v, malloc(ncopy * sizeof(int)), ncopy, prog, 0, 0 };
+    CopyCtx c = { p->v, malloc(ncopy * sizeof(int)), ncopy, prog, 0, 0, 0, serial ? CreateSemaphoreW(NULL, 1, 1, NULL) : NULL };
     for (int i = 0, k = 0; i < p->n; i++)
         if (p->v[i].kind == J_COPY && !p->v[i].done)
             c.idx[k++] = i;
@@ -474,6 +527,8 @@ static BOOL RunCopies(Plan *p, FcProgress *prog, BOOL retry)
         CopyWorker(&c);
     for (int t = 0; t < nt; t++)
         CloseHandle(th[t]);
+    if (c.bigLane)
+        CloseHandle(c.bigLane);
     free(c.idx);
     prog->errorHalted = c.halt;
     return c.failed == 0;
@@ -628,8 +683,12 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
             goto out;
         }
     }
+    // Sequential source or target: big files one at a time (small ones stay parallel).
+    BOOL serial = gOneBig >= 0 ? gOneBig : SerialDevice(items[0].src) || SerialDevice(items[0].dstDir);
+    if (serial)
+        FcLog(L"sequential device: files of 2 MB or more one at a time");
     BOOL copied = TRUE;
-    for (int round = 0; ncopy && !(copied = RunCopies(&p, prog, round > 0)) && !prog->cancel && AskRetry(&p, prog); round++)
+    for (int round = 0; ncopy && !(copied = RunCopies(&p, prog, round > 0, serial)) && !prog->cancel && AskRetry(&p, prog); round++)
         ;
     prog->phase = FC_PHASE_FINISH;
     if (prog->cancel) {
