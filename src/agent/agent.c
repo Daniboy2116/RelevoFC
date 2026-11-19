@@ -3,10 +3,13 @@
 // Explorer restarts. Runs with the user's rights on purpose: no SYSTEM process loads our DLL.
 //   fc_agent.exe          watch and inject (single instance)
 //   fc_agent.exe --once   inject into current explorer processes and exit
+//   fc_agent.exe --check-update   look for a new release now (asks before installing) and exit
+// It also checks for new releases once a day (update.c).
 #include <windows.h>
 #include <tlhelp32.h>
 #include <shlwapi.h>
 #include "../engine/engine.h"
+#include "update.h"
 
 #define HOOK_DLL L"fc_hook.dll"
 #define MAX_KNOWN 64
@@ -115,11 +118,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
         Sweep(dll, known, &nknown);
         return 0;
     }
+    if (wcsstr(cmd, L"--check-update")) {
+        FcCheckForUpdate(TRUE);
+        return 0;
+    }
 
     HANDLE mutex = CreateMutexW(NULL, TRUE, L"Local\\RelevoFCAgent");
     if (GetLastError() == ERROR_ALREADY_EXISTS)
         return 0;
-    FcLog(L"agent: started, dll=%s", dll);
+    FcLog(L"agent: started %s, dll=%s", FcVersion(), dll);
+    FcStartUpdateChecks();
     // shortcut: 1 s polling; switch to a process-start event (WMI/ETW) if the delay ever matters.
     for (;;) {
         Sweep(dll, known, &nknown);

@@ -22,6 +22,10 @@ cl /nologo /utf-8 /O2 /W3 /MT /Fo"%ROOT%obj\\" /Fe"%ROOT%bin\ui_demo.exe" "%ROOT
 cl /nologo /utf-8 /O2 /W3 /MT /Fo"%ROOT%obj\\" /Fe"%ROOT%bin\RelevoFC.exe" "%ROOT%src\admin\admin.c" %ENGINE% %LIBS% ^
   /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED || exit /b 1
 
-cl /nologo /utf-8 /O2 /W3 /MT /Fo"%ROOT%obj\\" /Fe"%ROOT%bin\fc_agent.exe" "%ROOT%src\agent\agent.c" "%ROOT%src\engine\log.c" ^
-  shlwapi.lib /link /SUBSYSTEM:WINDOWS || exit /b 1
+rem The agent's version decides when it offers an update: package.bat sets it, otherwise git (e.g. v0.4.0-6-g4d6b1d8).
+if not defined RELEVOFC_VERSION for /f %%v in ('git -C "%ROOT%." describe --tags 2^>nul') do set RELEVOFC_VERSION=%%v
+if not defined RELEVOFC_VERSION set RELEVOFC_VERSION=v0.0.0
+cl /nologo /utf-8 /O2 /W3 /MT /DRELEVOFC_VERSION=\"%RELEVOFC_VERSION%\" /Fo"%ROOT%obj\\" /Fe"%ROOT%bin\fc_agent.exe" ^
+  "%ROOT%src\agent\agent.c" "%ROOT%src\agent\update.c" "%ROOT%src\engine\log.c" ^
+  shlwapi.lib winhttp.lib bcrypt.lib user32.lib advapi32.lib /link /SUBSYSTEM:WINDOWS || exit /b 1
 echo BUILD OK

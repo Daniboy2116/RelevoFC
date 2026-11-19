@@ -14,6 +14,8 @@ El nombre viene de **Relevo** (toma el relevo de la copia de Windows y se lo dev
 
 Listo: copiar y mover en el Explorador ya pasa por RelevoFC. Para quitarlo, doble clic en **`Desinstalar.bat`**.
 
+**Actualizaciones:** una vez al día RelevoFC mira si hay una release nueva (también las pre-release). Si la hay, pregunta antes de nada; al aceptar descarga el ZIP, comprueba que coincide con el SHA-256 que publica GitHub y lo instala (Windows pedirá permiso de administrador y el Explorador se reiniciará). Si eliges No, no vuelve a avisar de esa versión. Para comprobarlo en el momento: `"C:\Program Files\RelevoFC\fc_agent.exe" --check-update`. Para desactivarlo: `[updates] check=0` en `settings.ini`.
+
 Si tenías instalada la versión anterior (FastCopy-Win), instala esta encima: el instalador quita la tarea y la carpeta antiguas.
 
 Windows puede mostrar un aviso de SmartScreen porque los archivos no están firmados: pulsa **Más información → Ejecutar de todos modos**. Antes de instalar, lee los [Riesgos](#riesgos).
@@ -52,6 +54,9 @@ Ambas copias con el origen en caché y verificadas: mismos archivos y mismos byt
   big_file_mb=256    ; por encima, copia sin caché
   verify_copies=0    ; 1 = verificar también las copias (más lento, al mover siempre se verifica)
   big_files_one_at_a_time=-1  ; -1 = según el disco (recomendado), 0 = nunca, 1 = siempre
+
+  [updates]
+  check=1            ; 0 = no buscar versiones nuevas
   ```
 - **Rutas largas:** copia y mueve carpetas anidadas más allá de los 260 caracteres de Windows (hasta unos 32.000).
 - **Más detalles:** la barra de progreso se transforma en una gráfica de velocidad de toda la operación (con media y máxima), y aparecen elementos procesados y restantes, datos, tiempo transcurrido y restante, y la ruta. Recuerda si lo dejaste abierto. Las animaciones respetan la opción "Efectos de animación" de Windows.
@@ -133,7 +138,7 @@ git submodule update --init
 | `bench.exe` | Mide una copia con el motor real: `bench.exe <hilos> <origen> <carpeta destino> [verify] [lane=0\|1]` |
 | `ui_demo.exe` | Abre la ventana de progreso real fuera del Explorador: `ui_demo.exe <destino> <archivo> [<archivo>...]` |
 
-`package.bat` compila y deja en `dist\RelevoFC.zip` lo que necesita un usuario (es el archivo que se sube a Releases).
+`package.bat v0.5.0` compila y deja en `dist\RelevoFC.zip` lo que necesita un usuario (es el archivo que se sube a Releases). La versión que le pasas tiene que ser la etiqueta de la release: es la que lleva dentro el agente para saber si hay una más nueva. Sin argumento no empaqueta; `build.bat` solo toma la versión de `git describe`.
 
 Para probar la ventana con discos rápidos, escribe un número N en `%TEMP%\relevofc_slow` y cada archivo se copiará a N MB/s como mucho (también dentro del Explorador). Bórralo para volver a la velocidad normal.
 
@@ -199,6 +204,9 @@ src/
   engine/engine.c  motor de copia/movimiento (planificación, copia paralela, verificación)
   engine/log.c     registro en %TEMP%\relevofc.log
   agent/agent.c    agente que carga la DLL en el Explorador
+  agent/update.c   busca releases nuevas en GitHub y las instala (preguntando)
+  admin/admin.c    RelevoFC.exe: hace las copias que necesitan permisos de administrador
+  hook/elevate.c   lanza RelevoFC.exe con UAC y muestra su progreso en la ventana
 tests/
   engine_test.c    tests del motor
   ui_demo.c        ventana de progreso fuera del Explorador
