@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "ui.h"
+#include "elevate.h"
 
 #define SHOW_DELAY_MS 500  // operations shorter than this never show up
 #define TIMER_TICK 1
@@ -295,7 +296,7 @@ static void Layout(Dlg *d)
         BOOL bvisible = ask && o->cf > 0.6 && by >= viewTop && by + bh <= panelBottom && by + bh <= footerTop;
         // One file has nothing to choose file by file: three buttons then, four otherwise.
         // An error question has two buttons (skip, retry): the skip and keep-both slots, in two columns.
-        BOOL err = o->prog->askError != 0;
+        BOOL err = o->prog->askError || o->prog->askAdmin;  // admin: Cancel / Continue, same two slots
         int nb = err ? 2 : o->prog->conflictCount > 1 ? CONFLICT_BTNS : CONFLICT_BTNS - 1, bw = (rc.right - 2 * m - (nb - 1) * gap) / nb;
         for (int k = 0; k < CONFLICT_BTNS && dw; k++) {
             int slot = err ? k - 1 : k;
@@ -703,6 +704,22 @@ static void PaintPanel(Dlg *d, Op *o, HDC dc, int top, int width)
     SelectObject(dc, d->font);
     DrawPieces(dc, m, top, right, S(d, 20), pieces, colors, 4);
 
+    if (pr->conflictPending && pr->askAdmin) {
+        // Like Windows' "Destination Folder Access Denied", in the panel: Cancel / Continue (shield) below.
+        WCHAR sub[MAX_PATH + 64];
+        RECT q = { m, top + S(d, 24), right - S(d, ICON_BTN) - S(d, 8), top + S(d, 52) };
+        SelectObject(dc, d->fontTitle);
+        SetTextColor(dc, pal->text);
+        DrawTextW(dc, L"Se necesita permiso de administrador", -1, &q, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        swprintf_s(sub, _countof(sub), L"Para %s a «%s», Windows pedirá confirmación.", o->move ? L"mover" : L"copiar", o->destName);
+        q.top = top + S(d, 54);
+        q.bottom = q.top + S(d, 22);
+        q.right = right;
+        SelectObject(dc, d->font);
+        SetTextColor(dc, pal->sub);
+        DrawTextW(dc, sub, -1, &q, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        return;
+    }
     if (pr->conflictPending && pr->askError) {
         // Same panel for "some files failed": which one and why, then Skip / Retry below.
         WCHAR name[MAX_PATH], why[256], ask[MAX_PATH + 64];
@@ -1039,6 +1056,20 @@ static void DrawButtonNow(Dlg *d, const DRAWITEMSTRUCT *di)
         GetWindowTextW(di->hwndItem, label, 48);
         SetTextColor(dc, accent ? (disabled ? Mix(RGB(255, 255, 255), pal->bg, 0.6) : RGB(255, 255, 255)) : pal->text);
         SelectObject(dc, d->font);
+        if (id == ID_CONFLICT + 2 && !wcscmp(label, L"Continuar")) {  // the UAC shield before the label, as Windows does
+            SHSTOCKICONINFO si = { sizeof(si) };
+            RECT tr = rc;
+            DrawTextW(dc, label, -1, &tr, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+            int ic = S(d, 16), gap = S(d, 8), w = ic + gap + (tr.right - tr.left);
+            int x = (rc.left + rc.right - w) / 2, cy = (rc.top + rc.bottom) / 2;
+            if (SUCCEEDED(SHGetStockIconInfo(SIID_SHIELD, SHGSI_ICON | SHGSI_SMALLICON, &si))) {
+                DrawIconEx(dc, x, cy - ic / 2, si.hIcon, ic, ic, 0, NULL, DI_NORMAL);
+                DestroyIcon(si.hIcon);
+            }
+            RECT lr = { x + ic + gap, rc.top, rc.right, rc.bottom };
+            DrawTextW(dc, label, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            return;
+        }
         DrawTextW(dc, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         return;
     }
@@ -1170,9 +1201,9 @@ static void Tick(Dlg *d)
                 SetWindowSubclass(o->cbtn[k], ButtonProc, 1, (DWORD_PTR)d);
             }
         }
-        if (asking) {  // conflict: Skip / Keep both; failed files: Skip / Retry; stopped: Cancel / Retry
-            PCWSTR want[2] = { pr->askError && pr->errorHalted ? L"Cancelar" : L"Omitir",
-                               pr->askError ? L"Reintentar" : L"Conservar ambos" };
+        if (asking) {  // conflict: Skip / Keep both; failed files: Skip / Retry; stopped or admin: Cancel / Retry or Continue
+            PCWSTR want[2] = { pr->askAdmin || (pr->askError && pr->errorHalted) ? L"Cancelar" : L"Omitir",
+                               pr->askAdmin ? L"Continuar" : pr->askError ? L"Reintentar" : L"Conservar ambos" };
             for (int k = 0; k < 2; k++) {
                 WCHAR cur[32];
                 GetWindowTextW(o->cbtn[k + 1], cur, 32);
@@ -1870,7 +1901,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     ask = d->ops[i];
         if (ask && LOWORD(wp) == ID_CONFLICT + 3) {
             OpenPick(d, ask);  // the question stays open until the list is answered
-        } else if (ask && ask->prog->askError && ask->prog->errorHalted && LOWORD(wp) == ID_CONFLICT + 1) {
+        } else if (ask && (ask->prog->askAdmin || (ask->prog->askError && ask->prog->errorHalted)) && LOWORD(wp) == ID_CONFLICT + 1) {
             CancelOp(ask);  // "Cancelar" on a stopped operation: same as the X, the engine cleans up as on any cancel
             StartFrames(d);
         } else if (ask) {
@@ -2160,7 +2191,8 @@ static DWORD WINAPI UiThread(LPVOID ready)
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.lpszClassName = L"RelevoFCProgress";
     WCHAR exe[MAX_PATH];
-    GetModuleFileNameW(NULL, exe, MAX_PATH);  // reuse Explorer's own icon
+    GetWindowsDirectoryW(exe, MAX_PATH);  // reuse Explorer's own icon, also in RelevoFC.exe
+    wcscat_s(exe, MAX_PATH, L"\\explorer.exe");
     wc.hIcon = ExtractIconW(gInst, exe, 0);
     RegisterClassExW(&wc);
     WNDCLASSEXW pc = wc;
@@ -2302,10 +2334,30 @@ static BOOL AskError(FcProgress *prog, int count, PCWSTR list)
     return c == 2;
 }
 
+// Same hand-off for "needs administrator permission". No window to ask in: the UAC prompt is the question.
+static BOOL AskAdmin(FcProgress *prog)
+{
+    if (!prog->conflictEvent)
+        return TRUE;
+    prog->conflictChoice = -1;
+    prog->askAdmin = 1;
+    prog->conflictPending = 1;
+    SetEvent(prog->conflictEvent);
+    while (prog->conflictChoice < 0 && !prog->cancel)
+        Sleep(30);
+    LONG c = prog->conflictChoice;
+    prog->conflictPending = 0;
+    prog->askAdmin = 0;
+    return c == 2 && !prog->cancel;
+}
+
 static DWORD WINAPI Worker(LPVOID arg)
 {
     Work *w = arg;
     w->res = FcRun(w->items, w->n, w->prog);
+    // Protected folder: ask in this window, then the elevated RelevoFC.exe works and this window keeps showing it.
+    if (w->res == FC_NEEDS_ADMIN)
+        w->res = AskAdmin(w->prog) ? RunElevated(w->items, w->n, w->prog) : FC_CANCELLED;
     return 0;
 }
 
@@ -2344,7 +2396,8 @@ FcResult RunWithProgress(const FcItem *items, int n, FcProgress *prog)
         BOOL ui = o && o->added;
         for (BOOL asked = r == WAIT_OBJECT_0 + 1;; asked = TRUE) {
             if (asked && !ui && prog->conflictPending)  // no window to ask in: use a dialog
-                prog->conflictChoice = prog->askError ? (AskErrorDialog(prog->conflictCount, prog->failed) ? 2 : 1)
+                prog->conflictChoice = prog->askAdmin ? 2
+                                     : prog->askError ? (AskErrorDialog(prog->conflictCount, prog->failed) ? 2 : 1)
                                                       : AskConflictDialog(prog->conflictCount, prog->conflictExample);
             if (WaitForMultipleObjects(prog->conflictEvent ? 2 : 1, wait, FALSE, INFINITE) == WAIT_OBJECT_0)
                 break;

@@ -107,7 +107,7 @@ Si lo pruebas en otra versión, abre un issue contando cómo fue (y adjunta `%TE
 
 - Una versión compatible de la tabla anterior.
 - Para compilar (no hace falta para usar el ZIP de Releases): Visual Studio 2022 Build Tools con el componente de C++ (MSVC) y el Windows SDK.
-- Permisos de administrador solo para instalar (copiar a `Program Files`).
+- Permisos de administrador para instalar (copiar a `Program Files`). Al copiar o mover a una carpeta protegida (`Program Files`, `C:\`...), RelevoFC pide permiso con el aviso de Windows (UAC) y hace la copia él mismo desde `RelevoFC.exe`.
 
 ## Compilar
 

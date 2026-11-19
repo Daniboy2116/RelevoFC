@@ -284,7 +284,7 @@ static HRESULT STDMETHODCALLTYPE hkPerform(IFileOperation *op)
             FcLog(L"op=%p NATIVE items=%d hr=0x%08lX %llu ms", op, n, hr, GetTickCount64() - t0);
         return hr;
     }
-    static const PCWSTR names[] = { L"OK", L"FALLBACK", L"ERROR", L"CANCELLED" };
+    static const PCWSTR names[] = { L"OK", L"FALLBACK", L"ERROR", L"CANCELLED", L"NEEDS_ADMIN" };
     ULONGLONG ms = GetTickCount64() - t0;
     LONG64 bytes = prog.bytesDone;
     FcLog(L"op=%p RELEVOFC %s items=%d files=%ld/%ld bytes=%lld %llu ms (%.1f MB/s)", op, names[r], n,

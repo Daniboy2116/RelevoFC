@@ -19,7 +19,7 @@ $copy = @"
 New-Item -ItemType Directory -Force '$dst' | Out-Null
 if (Test-Path '$hook') { try { Remove-Item '$hook' } catch { Rename-Item '$hook' "fc_hook.old-`$([DateTime]::Now.Ticks).dll" } }
 Get-ChildItem '$dst' -Filter 'fc_hook.old-*.dll' | ForEach-Object { try { Remove-Item `$_.FullName } catch {} }
-Copy-Item '$src\fc_agent.exe', '$src\fc_hook.dll' '$dst' -Force
+Copy-Item '$src\fc_agent.exe', '$src\fc_hook.dll', '$src\RelevoFC.exe' '$dst' -Force
 Unregister-ScheduledTask -TaskName 'FastCopyAgent' -Confirm:`$false -ErrorAction SilentlyContinue
 # The old DLL may still be loaded in Explorer: whatever can't go now goes on the next install or uninstall.
 if (Test-Path '$legacy') { Remove-Item '$legacy' -Recurse -Force -ErrorAction SilentlyContinue }

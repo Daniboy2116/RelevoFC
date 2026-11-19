@@ -1,6 +1,7 @@
 // Self-check for the engine, run outside Explorer. Uses %TEMP% and, if present, D:\ for cross-volume.
 #include <windows.h>
 #include <stdio.h>
+#include <shlobj.h>
 #include "../src/engine/engine.h"
 
 static int failures;
@@ -154,6 +155,15 @@ static void RunSuite(PCWSTR root, PCWSTR otherRoot)
 
     // 2. same copy again: target exists, must fall back without writing
     CHECK(FcRun(&copy, 1, Reset(&pr)) == FC_FALLBACK);
+
+    // 2b. destination needs admin (unelevated run only): nothing written, the hook reruns it elevated
+    WCHAR pf[MAX_PATH];
+    if (GetEnvironmentVariableW(L"ProgramFiles", pf, MAX_PATH) && !IsUserAnAdmin()) {
+        FcItem denied = { FALSE, src, pf, NULL };
+        CHECK(FcRun(&denied, 1, Reset(&pr)) == FC_NEEDS_ADMIN);
+        Path(b, pf, L"tree");
+        CHECK(!Exists(b));
+    }
 
     // 3. copy a single file with a new name
     Path(a, root, L"src\\single.txt");

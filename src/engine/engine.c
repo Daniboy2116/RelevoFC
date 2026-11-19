@@ -63,6 +63,7 @@ typedef struct {
     Job *v;
     int n, cap;
     BOOL allow;  // conflicts can be resolved (a callback is set); otherwise they fall back
+    BOOL admin;  // planning stopped on access denied: an elevated run could do it
     int nconf;
     WCHAR firstConf[MAX_PATH];
 } Plan;
@@ -187,6 +188,17 @@ static BOOL SameVolume(PCWSTR a, PCWSTR b)
            !_wcsicmp(Plain(va), Plain(vb));
 }
 
+// Asks NTFS whether this (unelevated) process may open `path` with `access`, without touching it.
+static BOOL Allowed(PCWSTR path, DWORD access)
+{
+    HANDLE h = CreateFileW(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return FALSE;
+    CloseHandle(h);
+    return TRUE;
+}
+
 static BOOL PlanItem(Plan *p, const FcItem *it, FcProgress *prog)
 {
     if (!IsDrivePath(it->src) || !IsDrivePath(it->dstDir)) {
@@ -209,6 +221,13 @@ static BOOL PlanItem(Plan *p, const FcItem *it, FcProgress *prog)
         FcLog(L"fallback: source missing or reparse point %s", src);
     } else if ((attr & FILE_ATTRIBUTE_DIRECTORY) && !_wcsnicmp(Plain(dst), Plain(src), ls) && Plain(dst)[ls] == L'\\') {
         FcLog(L"fallback: destination inside source %s", dst);
+    } else if (!Allowed(dstDir, attr & FILE_ATTRIBUTE_DIRECTORY ? FILE_ADD_SUBDIRECTORY : FILE_ADD_FILE) ||
+               (it->move && !Allowed(src, DELETE))) {
+        // Protected folder (Program Files, C:\...): the caller can rerun the whole operation elevated.
+        // shortcut: only the top item is checked; a denied file deeper in a folder still ends as an error.
+        DWORD e = GetLastError();
+        p->admin = e == ERROR_ACCESS_DENIED;
+        FcLog(L"%s: no access (%lu) %s -> %s", p->admin ? L"needs admin" : L"fallback", e, src, dstDir);
     } else if (it->move && SameVolume(src, dstDir)) {
         ok = Push(p, J_RENAME, TRUE, src, dst, 0);
     } else if (attr & FILE_ATTRIBUTE_DIRECTORY) {
@@ -637,8 +656,11 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
             res = FC_CANCELLED;
             goto out;
         }
-        if (!ok)
+        if (!ok) {
+            if (p.admin)
+                res = FC_NEEDS_ADMIN;
             goto out;
+        }
     }
     if (!ResolveConflicts(&p, prog)) {
         res = FC_CANCELLED;
@@ -711,7 +733,7 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
     res = DeleteMovedSources(&p, FALSE) ? FC_OK : FC_ERROR;
 
 out:
-    if (res != FC_FALLBACK)
+    if (res != FC_FALLBACK && res != FC_NEEDS_ADMIN)
         Notify(items, n);
     for (i = 0; i < p.n; i++) {
         free(p.v[i].src);

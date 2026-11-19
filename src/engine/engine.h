@@ -37,6 +37,8 @@ struct FcProgress {
     // The same hand-off also carries the "some files failed" question: askError is set while it is open and the
     // answer is 1 (skip) or 2 (retry); the text to show is in `failed`.
     volatile LONG askError;
+    // Same hand-off for "this needs administrator permission": answer 2 = continue (UAC), else cancel.
+    volatile LONG askAdmin;
     // The last copy round stopped early on a device-level error (unplugged, asleep, disk full...): the
     // question is then "stopped at N %: retry or cancel" instead of "these files failed: retry or skip".
     volatile LONG errorHalted;
@@ -55,7 +57,8 @@ typedef enum {
     FC_OK,         // everything copied/moved
     FC_FALLBACK,   // nothing was written; let Windows do it (conflicts, virtual paths, reparse points...)
     FC_ERROR,      // some files failed (see prog->filesFailed); the others were done, and a move only deletes the sources it verified
-    FC_CANCELLED   // user cancelled: finished files stay, moved files are only removed from the source once verified
+    FC_CANCELLED,  // user cancelled: finished files stay, moved files are only removed from the source once verified
+    FC_NEEDS_ADMIN // nothing was written: a source or destination is denied to this (unelevated) process
 } FcResult;
 
 FcResult FcRun(const FcItem *items, int n, FcProgress *prog);
