@@ -133,6 +133,36 @@ static void ConflictSuite(PCWSTR root, PCWSTR otherRoot)
     CHECK(Exists(b) && SameContent(s2, b) && !SameContent(s2, d2));  // both kept
 }
 
+// What Ctrl+Z gets to take back: a new folder as one item, a merge file by file, a move with its origin.
+static void UndoSuite(PCWSTR root)
+{
+    WCHAR tree[MAX_PATH], dst[MAX_PATH], a[MAX_PATH], one[MAX_PATH];
+    Path(tree, root, L"src\\tree");
+    Path(dst, root, L"dst");
+    Path(a, root, L"dst\\tree");
+    FcProgress pr;
+    FcItem folder = { FALSE, tree, dst, NULL };
+    Reset(&pr)->wantUndo = TRUE;
+    CHECK(FcRun(&folder, 1, &pr) == FC_OK && pr.nundo == 1 && !_wcsicmp(pr.undo[0].dst, a) && !pr.undo[0].src);
+    FcFreeUndo(pr.undo, pr.nundo);
+
+    Path(one, root, L"src\\tree\\sub\\new.txt");
+    WriteFileText(one, "new", 0);
+    Path(a, root, L"dst\\tree\\sub\\new.txt");
+    gChoice = FC_CONFLICT_SKIP;
+    Reset(&pr)->onConflict = Ask;
+    pr.wantUndo = TRUE;
+    CHECK(FcRun(&folder, 1, &pr) == FC_OK && pr.nundo == 1 && !_wcsicmp(pr.undo[0].dst, a));
+    FcFreeUndo(pr.undo, pr.nundo);
+
+    Path(one, root, L"src\\single.txt");
+    Path(a, root, L"dst\\single.txt");
+    FcItem mv = { TRUE, one, dst, NULL };
+    Reset(&pr)->wantUndo = TRUE;
+    CHECK(FcRun(&mv, 1, &pr) == FC_OK && pr.nundo == 1 && !_wcsicmp(pr.undo[0].dst, a) && pr.undo[0].src && !_wcsicmp(pr.undo[0].src, one));
+    FcFreeUndo(pr.undo, pr.nundo);
+}
+
 static void RunSuite(PCWSTR root, PCWSTR otherRoot)
 {
     WCHAR src[MAX_PATH], dst[MAX_PATH], a[MAX_PATH], b[MAX_PATH];
@@ -370,6 +400,11 @@ int wmain(void)
     CreateDirectoryW(root, NULL);
     BuildTree(root);
     ConflictSuite(root, root);
+    Nuke(root);
+
+    CreateDirectoryW(root, NULL);
+    BuildTree(root);
+    UndoSuite(root);
     Nuke(root);
 
     CreateDirectoryW(root, NULL);

@@ -25,6 +25,13 @@ typedef struct {
 static OpEntry gOps[MAX_OPS];
 static SRWLOCK gOpsLock = SRWLOCK_INIT;
 
+// SetOperationFlags of the last few operations (a ring, so ops that are never performed can't fill it).
+static struct {
+    IFileOperation *op;
+    DWORD flags;
+} gFlags[16];
+static int gFlagsNext;  // guarded by gOpsLock, like gFlags
+
 // Caller holds gOpsLock.
 static OpEntry *FindEntry(IFileOperation *op, BOOL create)
 {
@@ -174,6 +181,165 @@ static RenameItems_t oRenameItems;
 static DeleteItem_t oDeleteItem;
 static NewItem_t oNewItem;
 
+// ---- Ctrl+Z ----
+// Windows keeps an undo list of what it did; it never sees what RelevoFC did. gHist mirrors both, newest
+// last: our entries carry what to take back, NULL items stand for one entry on Windows' list. Ctrl+Z in a
+// folder view undoes ours when it is the newest and otherwise lets Windows undo its own.
+#define FOFX_UNDO_OP 0x20000000  // seen on the operations Windows' undo/redo performs (not in the SDK)
+typedef struct {
+    FcUndoItem *items;
+    int n;
+} Done;
+#define MAX_HIST 32
+static Done gHist[MAX_HIST];
+static int gHistN;
+static SRWLOCK gHistLock = SRWLOCK_INIT;
+static volatile ULONGLONG gRedoKeyAt;  // last Ctrl+Y in a folder view: the next Windows undo op is a redo
+
+static void HistPush(FcUndoItem *items, int n)
+{
+    AcquireSRWLockExclusive(&gHistLock);
+    if (gHistN == MAX_HIST) {
+        FcFreeUndo(gHist[0].items, gHist[0].n);
+        memmove(gHist, gHist + 1, (MAX_HIST - 1) * sizeof(Done));
+        gHistN--;
+    }
+    gHist[gHistN].items = items;
+    gHist[gHistN++].n = n;
+    ReleaseSRWLockExclusive(&gHistLock);
+}
+
+// Windows undid one of its own (a Ctrl+Z we let through, or its Undo menu): drop its newest entry.
+static void HistNativeUndone(void)
+{
+    AcquireSRWLockExclusive(&gHistLock);
+    for (int i = gHistN - 1; i >= 0; i--)
+        if (!gHist[i].items) {
+            memmove(&gHist[i], &gHist[i + 1], (gHistN - i - 1) * sizeof(Done));
+            gHistN--;
+            break;
+        }
+    ReleaseSRWLockExclusive(&gHistLock);
+}
+
+typedef struct {
+    Done d;
+    HWND owner;
+} UndoJob;
+
+// Moves go back through our own engine (MoveItem is hooked); copies go to the Recycle Bin through Windows.
+// Neither sets FOF_ALLOWUNDO: taking something back does not go on an undo list itself.
+static DWORD WINAPI UndoThread(LPVOID arg)
+{
+    UndoJob *u = arg;
+    HRESULT hrCo = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    for (int copies = 0; copies < 2; copies++) {
+        IFileOperation *op = NULL;
+        int queued = 0;
+        if (FAILED(CoCreateInstance(&CLSID_FileOperation, NULL, CLSCTX_INPROC_SERVER, &IID_IFileOperation, (void **)&op)))
+            break;
+        IFileOperation_SetOperationFlags(op, copies ? FOF_NOCONFIRMATION | FOFX_RECYCLEONDELETE : FOF_NOCONFIRMMKDIR);
+        IFileOperation_SetOwnerWindow(op, u->owner);
+        for (int i = 0; i < u->d.n; i++) {
+            FcUndoItem *it = &u->d.items[i];
+            IShellItem *si = NULL, *folder = NULL;
+            if (!it->src != copies)
+                continue;
+            if (FAILED(SHCreateItemFromParsingName(it->dst, NULL, &IID_IShellItem, (void **)&si))) {
+                FcLog(L"undo: no longer there %s", it->dst);
+                continue;
+            }
+            if (copies) {
+                queued += SUCCEEDED(IFileOperation_DeleteItem(op, si, NULL));
+            } else {
+                PWSTR dir = _wcsdup(it->src), slash = wcsrchr(dir, L'\\'), name = slash ? _wcsdup(slash + 1) : NULL;
+                if (slash) {
+                    slash[slash - dir == 2] = 0;  // "C:\x" keeps its root backslash
+                    SHCreateDirectoryExW(NULL, dir, NULL);  // the move removed the source folders it emptied
+                    if (SUCCEEDED(SHCreateItemFromParsingName(dir, NULL, &IID_IShellItem, (void **)&folder)))
+                        queued += SUCCEEDED(IFileOperation_MoveItem(op, si, folder, name, NULL));
+                }
+                if (folder)
+                    IShellItem_Release(folder);
+                free(name);
+                free(dir);
+            }
+            IShellItem_Release(si);
+        }
+        if (queued) {
+            HRESULT hr = IFileOperation_PerformOperations(op);
+            FcLog(L"undo: %s %d item(s) hr=0x%08lX", copies ? L"recycled" : L"moved back", queued, hr);
+        }
+        IFileOperation_Release(op);
+    }
+    FcFreeUndo(u->d.items, u->d.n);
+    free(u);
+    if (SUCCEEDED(hrCo))
+        CoUninitialize();
+    return 0;
+}
+
+// The file list of a folder window or the desktop (not the rename box, address bar or search).
+static BOOL InFolderView(HWND h)
+{
+    WCHAR c[32], pc[32];
+    HWND p = GetParent(h);
+    return p && GetClassNameW(h, c, 32) && GetClassNameW(p, pc, 32) && !wcscmp(pc, L"SHELLDLL_DefView") &&
+           (!wcscmp(c, L"DirectUIHWND") || !wcscmp(c, L"SysListView32"));
+}
+
+// Sees every message an Explorer thread takes from its queue, before accelerators handle it.
+static void OnMessage(MSG *m)
+{
+    if (m->message != WM_KEYDOWN || (m->wParam != 'Z' && m->wParam != 'Y') || GetKeyState(VK_CONTROL) >= 0 ||
+        GetKeyState(VK_SHIFT) < 0 || GetKeyState(VK_MENU) < 0 || !InFolderView(m->hwnd))
+        return;
+    if (m->wParam == 'Y') {
+        gRedoKeyAt = GetTickCount64();
+        return;
+    }
+    Done d = { 0 };
+    AcquireSRWLockExclusive(&gHistLock);
+    if (gHistN && gHist[gHistN - 1].items)
+        d = gHist[--gHistN];
+    ReleaseSRWLockExclusive(&gHistLock);
+    if (!d.items)
+        return;  // the newest is Windows': its own Ctrl+Z handles it
+    UndoJob *u = malloc(sizeof(*u));
+    u->d = d;
+    u->owner = GetAncestor(m->hwnd, GA_ROOT);
+    FcLog(L"undo: Ctrl+Z takes back %d item(s), first %s", d.n, d.n ? d.items[0].dst : L"");
+    HANDLE th = CreateThread(NULL, 0, UndoThread, u, 0, NULL);
+    if (th) {
+        CloseHandle(th);
+        m->message = WM_NULL;  // swallowed: Windows must not undo something of its own as well
+    } else {
+        FcFreeUndo(d.items, d.n);
+        free(u);
+    }
+}
+
+typedef BOOL (WINAPI *GetMsg_t)(LPMSG, HWND, UINT, UINT);
+typedef BOOL (WINAPI *PeekMsg_t)(LPMSG, HWND, UINT, UINT, UINT);
+static GetMsg_t oGetMsg;
+static PeekMsg_t oPeekMsg;
+
+static BOOL WINAPI hkGetMsg(LPMSG m, HWND h, UINT a, UINT b)
+{
+    BOOL r = oGetMsg(m, h, a, b);
+    if (r > 0)
+        OnMessage(m);
+    return r;
+}
+
+static BOOL WINAPI hkPeekMsg(LPMSG m, HWND h, UINT a, UINT b, UINT rm)
+{
+    BOOL r = oPeekMsg(m, h, a, b, rm);
+    if (r && (rm & PM_REMOVE))
+        OnMessage(m);
+    return r;
+}
+
 static HRESULT STDMETHODCALLTYPE hkSetFlags(IFileOperation *op, DWORD flags)
 {
     // Explorer calls this first on every new operation. shortcut: also used to drop stale entries
@@ -184,6 +350,12 @@ static HRESULT STDMETHODCALLTYPE hkSetFlags(IFileOperation *op, DWORD flags)
         e = NULL;
     if (e)
         FreeEntry(e);
+    for (int i = 0; i < _countof(gFlags); i++)  // an older op at the same address that never ran
+        if (gFlags[i].op == op)
+            gFlags[i].op = NULL;
+    gFlags[gFlagsNext].op = op;
+    gFlags[gFlagsNext].flags = flags;
+    gFlagsNext = (gFlagsNext + 1) % _countof(gFlags);
     ReleaseSRWLockExclusive(&gOpsLock);
     return oSetFlags(op, flags);
 }
@@ -264,10 +436,17 @@ static HRESULT STDMETHODCALLTYPE hkPerform(IFileOperation *op)
         mine = *e;
         ZeroMemory(e, sizeof(*e));  // ownership of items moves to `mine`
     }
+    DWORD flags = 0;
+    for (int i = 0; i < _countof(gFlags); i++)
+        if (gFlags[i].op == op) {
+            flags = gFlags[i].flags;
+            gFlags[i].op = NULL;
+        }
     ReleaseSRWLockExclusive(&gOpsLock);
 
     ULONGLONG t0 = GetTickCount64();
     FcProgress prog = { 0 };
+    prog.wantUndo = (flags & FOF_ALLOWUNDO) != 0;
     FcResult r = FC_FALLBACK;
     if (mine.n && !mine.unsupported) {
         if (Disabled())
@@ -280,10 +459,21 @@ static HRESULT STDMETHODCALLTYPE hkPerform(IFileOperation *op)
 
     if (r == FC_FALLBACK) {
         HRESULT hr = oPerform(op);
-        if (n)
-            FcLog(L"op=%p NATIVE items=%d hr=0x%08lX %llu ms", op, n, hr, GetTickCount64() - t0);
+        if (flags & FOFX_UNDO_OP) {
+            if (GetTickCount64() - gRedoKeyAt < 3000)
+                HistPush(NULL, 0);
+            else
+                HistNativeUndone();
+        } else if ((flags & FOF_ALLOWUNDO) && SUCCEEDED(hr)) {
+            HistPush(NULL, 0);
+        }
+        FcLog(L"op=%p NATIVE items=%d flags=0x%08lX hr=0x%08lX %llu ms", op, n, flags, hr, GetTickCount64() - t0);
         return hr;
     }
+    if (r == FC_OK && prog.undo)
+        HistPush(prog.undo, prog.nundo);
+    else
+        FcFreeUndo(prog.undo, prog.nundo);
     static const PCWSTR names[] = { L"OK", L"FALLBACK", L"ERROR", L"CANCELLED", L"NEEDS_ADMIN" };
     ULONGLONG ms = GetTickCount64() - t0;
     LONG64 bytes = prog.bytesDone;
@@ -329,7 +519,9 @@ static DWORD WINAPI InitThread(LPVOID unused)
             && Hook(vt->DeleteItem, hkDeleteItem, (void **)&oDeleteItem, L"DeleteItem")
             && Hook(vt->DeleteItems, hkDeleteItems, (void **)&oDeleteItems, L"DeleteItems")
             && Hook(vt->NewItem, hkNewItem, (void **)&oNewItem, L"NewItem")
-            && Hook(vt->PerformOperations, hkPerform, (void **)&oPerform, L"PerformOperations");
+            && Hook(vt->PerformOperations, hkPerform, (void **)&oPerform, L"PerformOperations")
+            && Hook(GetMessageW, hkGetMsg, (void **)&oGetMsg, L"GetMessageW")
+            && Hook(PeekMessageW, hkPeekMsg, (void **)&oPeekMsg, L"PeekMessageW");
     // All or nothing: a partial set could skip PerformOperations with unrecorded work queued.
     if (ok && MH_EnableHook(MH_ALL_HOOKS) == MH_OK)
         FcLog(L"hooks active");

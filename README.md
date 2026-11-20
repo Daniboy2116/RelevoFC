@@ -58,6 +58,7 @@ Ambas copias con el origen en caché y verificadas: mismos archivos y mismos byt
   [updates]
   check=1            ; 0 = no buscar versiones nuevas
   ```
+- **`Ctrl+Z` deshace** la última copia o movimiento de RelevoFC, como en Windows: una copia va a la papelera (si se combinó con una carpeta que ya existía, solo lo que añadió) y un movimiento vuelve a su sitio. Si lo último lo hizo Windows (renombrar, borrar...), lo deshace Windows.
 - **Rutas largas:** copia y mueve carpetas anidadas más allá de los 260 caracteres de Windows (hasta unos 32.000).
 - **Más detalles:** la barra de progreso se transforma en una gráfica de velocidad de toda la operación (con media y máxima), y aparecen elementos procesados y restantes, datos, tiempo transcurrido y restante, y la ruta. Recuerda si lo dejaste abierto. Las animaciones respetan la opción "Efectos de animación" de Windows.
 - **Si no lo tiene claro, se lo deja a Windows.** Antes de escribir nada, RelevoFC planifica toda la operación. Si encuentra algo que no maneja, no toca nada y la copia la hace Windows como siempre:
@@ -190,7 +191,7 @@ Lee esto antes de instalarlo:
 
 - **Se ejecuta código dentro del Explorador.** Un fallo en la DLL puede cerrar el Explorador. Windows lo reinicia solo y el agente vuelve a cargar RelevoFC, pero puede pasar.
 - **Antivirus y Smart App Control.** Cargar una DLL en otro proceso es una técnica que también usa el malware. Defender no lo bloqueó en las pruebas, pero otros antivirus o Smart App Control en modo "Activado" podrían hacerlo, porque los binarios no están firmados.
-- **El `Ctrl+Z` del Explorador no deshace** las copias y movimientos que hizo RelevoFC.
+- **`Ctrl+Z` solo en la lista de archivos:** deshace las copias y movimientos de RelevoFC con la tecla, pero no aparecen en el menú «Deshacer» del clic derecho ni se pueden rehacer con `Ctrl+Y`. No se deshacen las operaciones que terminaron con errores, canceladas o hechas como administrador.
 - **Solo comprobado en una máquina.** Por ahora, los datos importantes: con copia de seguridad.
 
 RelevoFC está diseñado para no perder datos: nunca borra un original de un movimiento sin haber verificado la copia byte a byte, y ante cualquier duda deja la operación en manos de Windows.

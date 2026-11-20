@@ -14,6 +14,13 @@ enum { FC_PHASE_PLAN, FC_PHASE_COPY, FC_PHASE_FINISH };
 // What to do with files that already exist at the destination (asked once per operation).
 // FC_CONFLICT_EACH: the answer is per file, in prog->conflictPick (REPLACE, SKIP or BOTH each).
 typedef enum { FC_CONFLICT_REPLACE, FC_CONFLICT_SKIP, FC_CONFLICT_BOTH, FC_CONFLICT_CANCEL, FC_CONFLICT_EACH } FcConflictChoice;
+// What a run that ended FC_OK created, so Ctrl+Z can take it back: `dst` is new (a folder means all of
+// it); for a move, `src` is where it came from (NULL for a copy). Files inside a folder that already
+// existed (merge) are listed one by one.
+typedef struct {
+    PWSTR src, dst;
+} FcUndoItem;
+
 typedef struct FcProgress FcProgress;
 typedef FcConflictChoice (*FcConflictFn)(FcProgress *prog, int count, PCWSTR example);
 // Some files failed: `list` has a "path, newline, indented reason" block per file.
@@ -51,6 +58,10 @@ struct FcProgress {
     // the same "path / reason" text the onError callback gets (truncated to fit).
     volatile LONG filesFailed;
     WCHAR failed[2048];
+    // Set wantUndo and, on FC_OK, the engine fills undo/nundo (free them with FcFreeUndo).
+    BOOL wantUndo;
+    FcUndoItem *undo;
+    int nundo;
 };
 
 typedef enum {
@@ -62,5 +73,6 @@ typedef enum {
 } FcResult;
 
 FcResult FcRun(const FcItem *items, int n, FcProgress *prog);
+void FcFreeUndo(FcUndoItem *undo, int n);
 
 void FcLog(const wchar_t *fmt, ...);

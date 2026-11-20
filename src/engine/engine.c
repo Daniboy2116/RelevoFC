@@ -625,6 +625,38 @@ static BOOL DeleteMovedSources(Plan *p, BOOL quietDirs)
     return ok;
 }
 
+// Jobs come in depth-first order, so everything under a folder we created follows it directly.
+static void BuildUndo(Plan *p, FcProgress *prog)
+{
+    FcUndoItem *u = malloc((p->n ? p->n : 1) * sizeof(FcUndoItem));
+    PCWSTR root = NULL;
+    size_t lr = 0;
+    int k = 0;
+    for (int i = 0; i < p->n; i++) {
+        Job *j = &p->v[i];
+        PCWSTR d = Plain(j->dst);
+        if (j->kind == J_SKIP || (j->kind == J_MKDIR && j->exists) || (root && !_wcsnicmp(d, root, lr) && d[lr] == L'\\'))
+            continue;
+        if (j->kind == J_MKDIR) {
+            root = d;
+            lr = wcslen(d);
+        }
+        u[k].dst = _wcsdup(d);
+        u[k++].src = j->fromMove ? _wcsdup(Plain(j->src)) : NULL;
+    }
+    prog->undo = u;
+    prog->nundo = k;
+}
+
+void FcFreeUndo(FcUndoItem *undo, int n)
+{
+    for (int i = 0; i < n; i++) {
+        free(undo[i].src);
+        free(undo[i].dst);
+    }
+    free(undo);
+}
+
 static void Notify(const FcItem *items, int n)
 {
     for (int i = 0; i < n; i++) {
@@ -731,6 +763,8 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
         goto out;
     }
     res = DeleteMovedSources(&p, FALSE) ? FC_OK : FC_ERROR;
+    if (res == FC_OK && prog->wantUndo)
+        BuildUndo(&p, prog);
 
 out:
     if (res != FC_FALLBACK && res != FC_NEEDS_ADMIN)
