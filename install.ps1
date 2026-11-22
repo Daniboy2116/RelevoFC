@@ -20,6 +20,8 @@ New-Item -ItemType Directory -Force '$dst' | Out-Null
 if (Test-Path '$hook') { try { Remove-Item '$hook' } catch { Rename-Item '$hook' "fc_hook.old-`$([DateTime]::Now.Ticks).dll" } }
 Get-ChildItem '$dst' -Filter 'fc_hook.old-*.dll' | ForEach-Object { try { Remove-Item `$_.FullName } catch {} }
 Copy-Item '$src\fc_agent.exe', '$src\fc_hook.dll', '$src\RelevoFC.exe' '$dst' -Force
+# From the downloaded zip they carry the internet mark: SmartScreen would block starting them.
+Get-ChildItem '$dst' | Unblock-File
 Unregister-ScheduledTask -TaskName 'FastCopyAgent' -Confirm:`$false -ErrorAction SilentlyContinue
 # The old DLL may still be loaded in Explorer: whatever can't go now goes on the next install or uninstall.
 if (Test-Path '$legacy') { Remove-Item '$legacy' -Recurse -Force -ErrorAction SilentlyContinue }
@@ -45,5 +47,6 @@ if ($loaded) {
     Start-Sleep 3
     if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
 }
-Start-Process (Join-Path $dst 'fc_agent.exe')
+# Through the task, not Start-Process: it runs as the normal user even if this script was run as admin.
+Start-ScheduledTask -TaskName 'RelevoFCAgent'
 Write-Host "RelevoFC instalado en $dst"
