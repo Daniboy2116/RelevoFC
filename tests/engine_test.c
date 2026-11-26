@@ -377,9 +377,6 @@ static void ErrorSuite(PCWSTR root, PCWSTR otherRoot)
     SetEnvironmentVariableW(L"RELEVOFC_INI", NULL);
 }
 
-static void Nuke(PCWSTR dir)
-{
-    WCHAR cmd[MAX_PATH + 32];
 static void Junction(PCWSTR link, PCWSTR target)
 {
     WCHAR cmd[3 * MAX_PATH];
@@ -415,6 +412,9 @@ static void JunctionSuite(PCWSTR root)
     CHECK(!Exists(p));
 }
 
+static void Nuke(PCWSTR dir)
+{
+    WCHAR cmd[MAX_PATH + 32];
     // \\?\ so folders nested past MAX_PATH go too
     swprintf_s(cmd, _countof(cmd), L"cmd /c attrib -r \"\\\\?\\%s\\*\" /s /d >nul & rd /s /q \"\\\\?\\%s\"", dir, dir);
     _wsystem(cmd);
@@ -451,13 +451,13 @@ int wmain(void)
     ErrorSuite(root, root);
     Nuke(root);
 
-    if (GetDriveTypeW(L"D:\\") == DRIVE_FIXED) {
-        WCHAR other[MAX_PATH];
-        swprintf_s(other, MAX_PATH, L"D:\\fc_test_%llu", GetTickCount64());
     CreateDirectoryW(root, NULL);
     JunctionSuite(root);
     Nuke(root);
 
+    if (GetDriveTypeW(L"D:\\") == DRIVE_FIXED) {
+        WCHAR other[MAX_PATH];
+        swprintf_s(other, MAX_PATH, L"D:\\fc_test_%llu", GetTickCount64());
         CreateDirectoryW(root, NULL);
         CreateDirectoryW(other, NULL);
         wprintf(L"cross volume: %s -> %s\n", root, other);
