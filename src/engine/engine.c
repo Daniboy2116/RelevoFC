@@ -51,6 +51,7 @@ typedef struct {
     BOOL done;  // copied (and verified, for moves)
     BOOL conflict, replace;  // J_COPY onto an existing file / overwrite it
     BOOL exists;             // J_MKDIR onto an existing folder (merge)
+    BOOL junction;           // J_MKDIR from a followed junction: a plain folder (no template, it would copy the link)
     PWSTR src, dst;
     ULONGLONG size;
     HRESULT hr;       // nonzero: the last attempt failed (FC_E_VERIFY: the copy differs from the source)
@@ -122,7 +123,7 @@ static BOOL Push(Plan *p, int kind, BOOL fromMove, PCWSTR src, PCWSTR dst, ULONG
     j->done = FALSE;
     j->hr = 0;
     j->credited = 0;
-    j->conflict = j->replace = j->exists = FALSE;
+    j->conflict = j->replace = j->exists = j->junction = FALSE;
     DWORD da = GetFileAttributesW(dst);
     if (da != INVALID_FILE_ATTRIBUTES) {
         BOOL dir = (da & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -145,7 +146,54 @@ static BOOL Push(Plan *p, int kind, BOOL fromMove, PCWSTR src, PCWSTR dst, ULONG
     return TRUE;
 }
 
-static BOOL PlanDir(Plan *p, PCWSTR src, PCWSTR dst, BOOL move, FcProgress *prog)
+// Folders being walked, as real paths (junctions resolved): a junction back into one of them would loop.
+typedef struct {
+    PWSTR v[64];
+    int n;
+} Walk;
+
+static PWSTR RealPath(PCWSTR path)
+{
+    HANDLE h = CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return NULL;
+    PWSTR r = malloc(32768 * sizeof(WCHAR));
+    DWORD n = GetFinalPathNameByHandleW(h, r, 32768, FILE_NAME_NORMALIZED);
+    CloseHandle(h);
+    if (!n || n >= 32768) {
+        free(r);
+        return NULL;
+    }
+    return r;
+}
+
+// `p` is `dir` or inside it.
+static BOOL Inside(PCWSTR dir, PCWSTR p)
+{
+    size_t l = wcslen(dir);
+    return !_wcsnicmp(p, dir, l) && (!p[l] || p[l] == L'\\');
+}
+
+// Copies follow junctions into a plain folder with their contents, as Windows' own copy does (pnpm's
+// node_modules is full of them). Moves don't: deleting the moved source would delete the junction's target.
+// Symlinks and other reparse points (OneDrive placeholders...) still go to Windows. NULL: fall back.
+static PWSTR FollowJunction(const WIN32_FIND_DATAW *fd, PCWSTR path, BOOL move, Walk *w)
+{
+    if (move || fd->dwReserved0 != IO_REPARSE_TAG_MOUNT_POINT || !(fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        w->n == _countof(w->v))
+        return NULL;
+    PWSTR real = RealPath(path);
+    for (int i = 0; real && i < w->n; i++)
+        if (Inside(real, w->v[i])) {
+            FcLog(L"fallback: junction loops back %s", path);
+            free(real);
+            return NULL;
+        }
+    return real;
+}
+
+static BOOL PlanDir(Plan *p, PCWSTR src, PCWSTR dst, BOOL move, FcProgress *prog, Walk *w)
 {
     PWSTR pattern = Join(src, L"*");
     WIN32_FIND_DATAW fd;
@@ -159,14 +207,21 @@ static BOOL PlanDir(Plan *p, PCWSTR src, PCWSTR dst, BOOL move, FcProgress *prog
     do {
         if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
             continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-            FcLog(L"fallback: reparse point %s\\%s", src, fd.cFileName);
-            ok = FALSE;
-            break;
-        }
         PWSTR s = Join(src, fd.cFileName), d = Join(dst, fd.cFileName);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            ok = Push(p, J_MKDIR, move, s, d, 0) && PlanDir(p, s, d, move, prog);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+            PWSTR real = FollowJunction(&fd, s, move, w);
+            if (!real) {
+                FcLog(L"fallback: reparse point 0x%08lX %s", fd.dwReserved0, s);
+                ok = FALSE;
+            } else if ((ok = Push(p, J_MKDIR, move, s, d, 0))) {
+                p->v[p->n - 1].junction = TRUE;
+                w->v[w->n++] = real;
+                ok = PlanDir(p, s, d, move, prog, w);
+                real = w->v[--w->n];
+            }
+            free(real);
+        } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            ok = Push(p, J_MKDIR, move, s, d, 0) && PlanDir(p, s, d, move, prog, w);
         else
             ok = Push(p, J_COPY, move, s, d, ((ULONGLONG)fd.nFileSizeHigh << 32) | fd.nFileSizeLow);
         free(s);
@@ -231,7 +286,10 @@ static BOOL PlanItem(Plan *p, const FcItem *it, FcProgress *prog)
     } else if (it->move && SameVolume(src, dstDir)) {
         ok = Push(p, J_RENAME, TRUE, src, dst, 0);
     } else if (attr & FILE_ATTRIBUTE_DIRECTORY) {
-        ok = Push(p, J_MKDIR, it->move, src, dst, 0) && PlanDir(p, src, dst, it->move, prog);
+        Walk w = { { RealPath(src) } };
+        w.n = w.v[0] != NULL;
+        ok = Push(p, J_MKDIR, it->move, src, dst, 0) && PlanDir(p, src, dst, it->move, prog, &w);
+        free(w.v[0]);
     } else {
         WIN32_FILE_ATTRIBUTE_DATA fa;
         ok = GetFileAttributesExW(src, GetFileExInfoStandard, &fa) &&
@@ -732,7 +790,7 @@ FcResult FcRun(const FcItem *items, int n, FcProgress *prog)
             FcLog(L"rename failed (%lu) %s", GetLastError(), j->src);
             goto out;
         }
-        if (j->kind == J_MKDIR && !j->exists && !CreateDirectoryExW(j->src, j->dst, NULL)) {
+        if (j->kind == J_MKDIR && !j->exists && !(j->junction ? CreateDirectoryW(j->dst, NULL) : CreateDirectoryExW(j->src, j->dst, NULL))) {
             FcLog(L"mkdir failed (%lu) %s", GetLastError(), j->dst);
             goto out;
         }

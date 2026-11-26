@@ -380,6 +380,41 @@ static void ErrorSuite(PCWSTR root, PCWSTR otherRoot)
 static void Nuke(PCWSTR dir)
 {
     WCHAR cmd[MAX_PATH + 32];
+static void Junction(PCWSTR link, PCWSTR target)
+{
+    WCHAR cmd[3 * MAX_PATH];
+    swprintf_s(cmd, _countof(cmd), L"cmd /c mklink /J \"%s\" \"%s\" >nul", link, target);
+    _wsystem(cmd);
+}
+
+// Copies follow junctions like Windows does (pnpm's node_modules); a junction that loops falls back.
+static void JunctionSuite(PCWSTR root)
+{
+    WCHAR proj[MAX_PATH], p[MAX_PATH], q[MAX_PATH], dst[MAX_PATH];
+    FcProgress pr;
+    Path(proj, root, L"proj"); CreateDirectoryW(proj, NULL);
+    Path(p, root, L"proj\\pkg"); CreateDirectoryW(p, NULL);
+    Path(p, root, L"proj\\pkg\\a.txt"); WriteFileText(p, "pkg", 0);
+    Path(p, root, L"proj\\node_modules"); CreateDirectoryW(p, NULL);
+    Path(p, root, L"proj\\node_modules\\pkg"); Path(q, root, L"proj\\pkg"); Junction(p, q);
+    Path(dst, root, L"dst"); CreateDirectoryW(dst, NULL);
+
+    FcItem copy = { FALSE, proj, dst, NULL };
+    CHECK(FcRun(&copy, 1, Reset(&pr)) == FC_OK);
+    Path(p, root, L"dst\\proj\\node_modules\\pkg");
+    CHECK(Exists(p) && !(GetFileAttributesW(p) & FILE_ATTRIBUTE_REPARSE_POINT));  // a plain folder now
+    Path(p, root, L"dst\\proj\\node_modules\\pkg\\a.txt"); Path(q, root, L"proj\\pkg\\a.txt");
+    CHECK(SameContent(p, q));
+    Path(p, root, L"proj\\node_modules\\pkg");
+    CHECK(GetFileAttributesW(p) & FILE_ATTRIBUTE_REPARSE_POINT);  // the source is untouched
+
+    Path(p, root, L"proj\\pkg\\back"); Junction(p, proj);  // proj\pkg\back -> proj: endless
+    Path(dst, root, L"dst2"); CreateDirectoryW(dst, NULL);
+    CHECK(FcRun(&copy, 1, Reset(&pr)) == FC_FALLBACK);
+    Path(p, root, L"dst2\\proj");
+    CHECK(!Exists(p));
+}
+
     // \\?\ so folders nested past MAX_PATH go too
     swprintf_s(cmd, _countof(cmd), L"cmd /c attrib -r \"\\\\?\\%s\\*\" /s /d >nul & rd /s /q \"\\\\?\\%s\"", dir, dir);
     _wsystem(cmd);
@@ -419,6 +454,10 @@ int wmain(void)
     if (GetDriveTypeW(L"D:\\") == DRIVE_FIXED) {
         WCHAR other[MAX_PATH];
         swprintf_s(other, MAX_PATH, L"D:\\fc_test_%llu", GetTickCount64());
+    CreateDirectoryW(root, NULL);
+    JunctionSuite(root);
+    Nuke(root);
+
         CreateDirectoryW(root, NULL);
         CreateDirectoryW(other, NULL);
         wprintf(L"cross volume: %s -> %s\n", root, other);
